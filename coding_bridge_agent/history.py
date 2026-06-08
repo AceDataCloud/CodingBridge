@@ -27,6 +27,7 @@ _TITLE_MAX = 80
 _DETAIL_MAX_EVENTS = 4000
 
 _TAG_RE = re.compile(r"<[^>]+>")
+_LEAD_TAG_RE = re.compile(r"^\s*<[^>]+>")
 _ID_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 _UUID_RE = re.compile(
     r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
@@ -95,7 +96,9 @@ def _claude_summary(path: Path) -> dict[str, Any]:
         if kind in ("user", "assistant") and isinstance(msg, dict):
             count += 1
             if not title and kind == "user":
-                title = _clean_title(_first_text(msg.get("content")))
+                cand = _first_text(msg.get("content"))
+                if cand and not _is_context_noise(cand):
+                    title = _clean_title(cand)
     return {
         "provider": "claude",
         "session_id": path.stem,
@@ -134,7 +137,7 @@ def _claude_user_events(
     content: Any, ts: int | None, events: list[dict[str, Any]], header: dict[str, Any]
 ) -> None:
     if isinstance(content, str):
-        if content.strip():
+        if content.strip() and not _is_context_noise(content):
             events.append({"kind": "prompt", "text": content, "ts": ts})
             if not header["title"]:
                 header["title"] = _clean_title(content)
@@ -146,6 +149,8 @@ def _claude_user_events(
             continue
         btype = block.get("type")
         if btype == "text" and block.get("text"):
+            if _is_context_noise(block["text"]):
+                continue
             events.append({"kind": "prompt", "text": block["text"], "ts": ts})
             if not header["title"]:
                 header["title"] = _clean_title(block["text"])
@@ -234,7 +239,9 @@ def _codex_summary(path: Path, index: dict[str, dict[str, Any]]) -> dict[str, An
             if role in ("user", "assistant"):
                 count += 1
                 if not title and role == "user":
-                    title = _clean_title(_codex_message_text(payload.get("content")))
+                    cand = _unwrap_user_text(_codex_message_text(payload.get("content")))
+                    if cand and not _is_context_noise(cand):
+                        title = _clean_title(cand)
     sid = sid or _codex_sid_from_name(path)
     meta = index.get(sid or "", {})
     return {
@@ -288,6 +295,9 @@ def _codex_response_event(
         if not text.strip():
             return
         if role == "user":
+            text = _unwrap_user_text(text)
+            if not text or _is_context_noise(text):
+                return
             events.append({"kind": "prompt", "text": text, "ts": ts})
             if not header["title"]:
                 header["title"] = _clean_title(text)
@@ -403,11 +413,13 @@ def _iter_jsonl(path: Path) -> Iterator[dict[str, Any]]:
 
 def _first_text(content: Any) -> str:
     if isinstance(content, str):
-        return content
+        return "" if _is_context_noise(content) else content
     if isinstance(content, list):
         for block in content:
             if isinstance(block, dict) and block.get("type") == "text" and block.get("text"):
-                return str(block["text"])
+                text = str(block["text"])
+                if not _is_context_noise(text):
+                    return text
     return ""
 
 
@@ -416,6 +428,55 @@ def _clean_title(text: str) -> str:
         return ""
     stripped = " ".join(_TAG_RE.sub(" ", text).split())
     return stripped[:_TITLE_MAX]
+
+
+# Tool-injected context messages that are not real user prompts: Codex AGENTS.md
+# / instruction / environment preambles and Claude IDE open-file reminders.
+_NOISE_PREFIXES = (
+    "# agents.md instructions",
+    "# copilot instructions",
+    "# context from my ide setup",
+    "the following is the codex agent history",
+    "the user opened the file",
+    "the user selected the lines",
+    "the user interrupted the previous turn",
+    "caveat: the messages below",
+    "<user_instructions>",
+    "<environment_context>",
+    "<cwd>",
+    "<permissions",
+    "<instructions>",
+    "<ide_opened_file>",
+    "<ide_selection>",
+    "<system-reminder>",
+    "<command-name>",
+    "<command-message>",
+    "<local-command-stdout>",
+)
+
+
+def _is_context_noise(text: str) -> bool:
+    """True if a user message is tool-injected context, not a typed prompt."""
+    if not text:
+        return True
+    head = text.lstrip().lower()
+    if head.startswith(_NOISE_PREFIXES):
+        return True
+    unwrapped = _LEAD_TAG_RE.sub("", head).lstrip()
+    return bool(unwrapped) and unwrapped.startswith(_NOISE_PREFIXES)
+
+
+_IDE_REQUEST_RE = re.compile(
+    r"##\s*My request(?: for Codex)?:\s*\n?(.*)", re.IGNORECASE | re.DOTALL
+)
+
+
+def _unwrap_user_text(text: str) -> str:
+    """Pull the typed prompt out of a Codex IDE-context wrapper; else return as-is."""
+    if text and text.lstrip().lower().startswith("# context from my ide setup"):
+        match = _IDE_REQUEST_RE.search(text)
+        return match.group(1).strip() if match else ""
+    return text
 
 
 def _maybe_json(value: Any) -> Any:

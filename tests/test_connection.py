@@ -195,3 +195,15 @@ async def test_fs_list_returns_snapshot(tmp_path):
     assert names == {"sub", "file.txt"}
     # Directories sort before files.
     assert listings[0]["entries"][0]["type"] == "dir"
+
+
+async def test_capabilities_get_returns_descriptor():
+    conn = _new_conn()
+    await conn._dispatch({"action": Action.CAPABILITIES_GET})
+    caps = [
+        m["payload"] for m in conn._ws.sent if m["payload"].get("event") == Event.CAPABILITIES
+    ]
+    assert caps
+    names = [p["name"] for p in caps[0]["providers"]]
+    assert names == ["claude", "codex"]
+

@@ -52,6 +52,7 @@ class Action:
     HISTORY_LIST = "history.list"
     HISTORY_GET = "history.get"
     FS_LIST = "fs.list"
+    CAPABILITIES_GET = "capabilities.get"
     PING = "ping"
 
 
@@ -72,6 +73,7 @@ class Event:
     HISTORY_SNAPSHOT = "history.snapshot"
     HISTORY_DETAIL = "history.detail"
     FS_LIST = "fs.list"
+    CAPABILITIES = "capabilities"
     PONG = "pong"
 
 

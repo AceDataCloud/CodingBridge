@@ -115,6 +115,10 @@ CLI flags override environment values.
 - **Scoped token.** Pairing yields a node token tied to your Ace account, stored
   locally with `0600` permissions. `coding-bridge-agent logout` removes it; the
   bridge can revoke it server-side.
+- **Directory browser & images stay local.** The `fs.list` action lets the
+  paired browser list directories to pick a working directory, and pasted images
+  are decoded to `<cwd>/.tmp/images/`. Both run within the OS permissions of the
+  account running the daemon — the same local trust boundary as a session.
 - **Your Claude auth stays put.** The agent uses your existing local Claude Code
   authentication via `claude-agent-sdk`.
 

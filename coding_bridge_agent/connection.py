@@ -12,7 +12,7 @@ import logging
 
 import websockets
 
-from . import history, protocol
+from . import fs, history, protocol
 from .config import Settings
 from .protocol import Action, Event, event_payload
 from .providers import KNOWN_PROVIDERS, default_provider_factory
@@ -131,7 +131,9 @@ class BridgeConnection:
             if action == Action.SESSION_START:
                 await self._start_session(payload)
             elif action == Action.SESSION_SEND:
-                await self._send_to_session(session_id, payload.get("prompt", ""))
+                await self._send_to_session(
+                    session_id, payload.get("prompt", ""), payload.get("images")
+                )
             elif action == Action.SESSION_INTERRUPT:
                 await self._interrupt_session(session_id)
             elif action == Action.SESSION_CLOSE:
@@ -144,6 +146,8 @@ class BridgeConnection:
                 await self._send_history_list(payload)
             elif action == Action.HISTORY_GET:
                 await self._send_history_detail(payload)
+            elif action == Action.FS_LIST:
+                await self._send_fs_list(payload)
             elif action == Action.PING:
                 await self.send_payload(event_payload(Event.PONG))
             else:
@@ -177,7 +181,7 @@ class BridgeConnection:
             return
         existing = self.sessions.get(session_id)
         if existing is not None:
-            await existing.send(payload.get("prompt", ""))
+            await existing.send(payload.get("prompt", ""), payload.get("images"))
             return
         session = Session(
             session_id,
@@ -192,16 +196,18 @@ class BridgeConnection:
             resume=payload.get("resume_session_id") or None,
         )
         self.sessions[session_id] = session
-        await session.start(payload.get("prompt", ""))
+        await session.start(payload.get("prompt", ""), payload.get("images"))
 
-    async def _send_to_session(self, session_id: str | None, prompt: str) -> None:
+    async def _send_to_session(
+        self, session_id: str | None, prompt: str, images: list | None = None
+    ) -> None:
         session = self.sessions.get(session_id) if session_id else None
         if session is None:
             await self.send_payload(
                 event_payload(Event.SESSION_ERROR, session_id, message="unknown session")
             )
             return
-        await session.send(prompt)
+        await session.send(prompt, images)
 
     async def _interrupt_session(self, session_id: str | None) -> None:
         session = self.sessions.get(session_id) if session_id else None
@@ -247,6 +253,14 @@ class BridgeConnection:
             return
         detail = await asyncio.to_thread(history.read_session, provider, session_id)
         await self.send_payload(event_payload(Event.HISTORY_DETAIL, session_id, **detail))
+
+    async def _send_fs_list(self, payload: dict) -> None:
+        result = await asyncio.to_thread(
+            fs.list_dir,
+            payload.get("path"),
+            show_hidden=bool(payload.get("show_hidden")),
+        )
+        await self.send_payload(event_payload(Event.FS_LIST, **result))
 
     async def aclose(self) -> None:
         for session in list(self.sessions.values()):

@@ -128,7 +128,7 @@ def test_build_argv_new_session():
     provider._sandbox = "workspace-write"
     provider._model = "gpt-5-codex"
     provider._effort = "high"
-    argv = provider._build_argv("do it", resume=False)
+    argv = provider._build_argv("do it", resume=False, image_paths=[])
     assert argv[:2] == ["codex", "exec"]
     assert "resume" not in argv
     assert "--json" in argv
@@ -141,9 +141,20 @@ def test_build_argv_new_session():
 def test_build_argv_resume_uses_thread_id():
     provider, _ = _provider()
     provider._thread_id = "thread-9"
-    argv = provider._build_argv("more", resume=True)
+    argv = provider._build_argv("more", resume=True, image_paths=[])
     assert argv[:4] == ["codex", "exec", "resume", "thread-9"]
     assert argv[-1] == "more"
+
+
+def test_build_argv_includes_image_args():
+    provider, _ = _provider()
+    provider._sandbox = "workspace-write"
+    argv = provider._build_argv("look", resume=False, image_paths=["/tmp/a.png", "/tmp/b.png"])
+    assert argv.count("-i") == 2
+    idx = [i for i, v in enumerate(argv) if v == "-i"]
+    assert argv[idx[0] + 1] == "/tmp/a.png"
+    assert argv[idx[1] + 1] == "/tmp/b.png"
+    assert argv[-1] == "look"
 
 
 @pytest.mark.parametrize(

@@ -51,6 +51,7 @@ class Action:
     SESSIONS_LIST = "sessions.list"
     HISTORY_LIST = "history.list"
     HISTORY_GET = "history.get"
+    FS_LIST = "fs.list"
     PING = "ping"
 
 
@@ -70,6 +71,7 @@ class Event:
     SESSIONS_SNAPSHOT = "sessions.snapshot"
     HISTORY_SNAPSHOT = "history.snapshot"
     HISTORY_DETAIL = "history.detail"
+    FS_LIST = "fs.list"
     PONG = "pong"
 
 

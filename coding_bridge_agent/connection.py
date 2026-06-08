@@ -12,7 +12,7 @@ import logging
 
 import websockets
 
-from . import protocol
+from . import history, protocol
 from .config import Settings
 from .protocol import Action, Event, event_payload
 from .providers import default_provider_factory
@@ -42,7 +42,7 @@ class BridgeConnection:
         self._stop = asyncio.Event()
 
     def capabilities(self) -> list[str]:
-        return ["claude"]
+        return ["claude", "history"]
 
     def stop(self) -> None:
         self._stop.set()
@@ -140,6 +140,10 @@ class BridgeConnection:
                 self._resolve_permission(payload)
             elif action == Action.SESSIONS_LIST:
                 await self._send_snapshot()
+            elif action == Action.HISTORY_LIST:
+                await self._send_history_list(payload)
+            elif action == Action.HISTORY_GET:
+                await self._send_history_detail(payload)
             elif action == Action.PING:
                 await self.send_payload(event_payload(Event.PONG))
             else:
@@ -161,6 +165,16 @@ class BridgeConnection:
                 event_payload(Event.SESSION_ERROR, None, message="session_id required")
             )
             return
+        provider = payload.get("provider") or "claude"
+        if provider != "claude":
+            await self.send_payload(
+                event_payload(
+                    Event.SESSION_ERROR,
+                    session_id,
+                    message=f"live sessions not supported for provider: {provider}",
+                )
+            )
+            return
         existing = self.sessions.get(session_id)
         if existing is not None:
             await existing.send(payload.get("prompt", ""))
@@ -173,6 +187,7 @@ class BridgeConnection:
             cwd=payload.get("cwd") or self.settings.default_cwd,
             model=payload.get("model") or self.settings.default_model,
             permission_mode=payload.get("permission_mode") or "default",
+            resume=payload.get("resume_session_id") or None,
         )
         self.sessions[session_id] = session
         await session.start(payload.get("prompt", ""))
@@ -212,6 +227,24 @@ class BridgeConnection:
                 sessions=[s.info() for s in self.sessions.values()],
             )
         )
+
+    async def _send_history_list(self, payload: dict) -> None:
+        limit = payload.get("limit") or 200
+        sessions = await asyncio.to_thread(history.list_sessions, limit)
+        await self.send_payload(event_payload(Event.HISTORY_SNAPSHOT, sessions=sessions))
+
+    async def _send_history_detail(self, payload: dict) -> None:
+        provider = payload.get("provider")
+        session_id = payload.get("session_id")
+        if not provider or not session_id:
+            await self.send_payload(
+                event_payload(
+                    Event.SESSION_ERROR, session_id, message="provider and session_id required"
+                )
+            )
+            return
+        detail = await asyncio.to_thread(history.read_session, provider, session_id)
+        await self.send_payload(event_payload(Event.HISTORY_DETAIL, session_id, **detail))
 
     async def aclose(self) -> None:
         for session in list(self.sessions.values()):

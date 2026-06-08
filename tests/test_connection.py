@@ -15,10 +15,12 @@ class FakeProvider:
         self.emit = emit
         self.ask = ask
         self.prompts = []
+        self.resume = None
         self.closed = False
 
-    async def start(self, prompt, *, cwd, model, permission_mode):
+    async def start(self, prompt, *, cwd, model, permission_mode, resume=None):
         self.prompts.append(prompt)
+        self.resume = resume
 
     async def send(self, prompt):
         self.prompts.append(prompt)
@@ -107,6 +109,29 @@ async def test_close_removes_session():
 async def test_unknown_action_reports_error():
     conn = _new_conn()
     await conn._dispatch({"action": "bogus.action", "session_id": "s1"})
+    assert Event.SESSION_ERROR in _events(conn)
+
+
+async def test_start_forwards_resume_session_id():
+    conn = _new_conn()
+    await conn._dispatch(
+        {
+            "action": Action.SESSION_START,
+            "session_id": "s1",
+            "prompt": "continue",
+            "resume_session_id": "prev-session",
+        }
+    )
+    await asyncio.sleep(0.01)
+    assert conn.sessions["s1"]._provider.resume == "prev-session"
+
+
+async def test_start_rejects_unsupported_provider():
+    conn = _new_conn()
+    await conn._dispatch(
+        {"action": Action.SESSION_START, "session_id": "s1", "prompt": "x", "provider": "codex"}
+    )
+    assert "s1" not in conn.sessions
     assert Event.SESSION_ERROR in _events(conn)
 
 

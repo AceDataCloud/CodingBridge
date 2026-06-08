@@ -39,9 +39,17 @@ class ClaudeProvider:
         self._connected = False
 
     async def start(
-        self, prompt: str, *, cwd: str, model: str | None, permission_mode: str
+        self,
+        prompt: str,
+        *,
+        cwd: str,
+        model: str | None,
+        permission_mode: str,
+        resume: str | None = None,
     ) -> None:
-        await self._ensure_client(cwd=cwd, model=model, permission_mode=permission_mode)
+        await self._ensure_client(
+            cwd=cwd, model=model, permission_mode=permission_mode, resume=resume
+        )
         await self._turn(prompt)
 
     async def send(self, prompt: str) -> None:
@@ -53,7 +61,9 @@ class ClaudeProvider:
             )
         await self._turn(prompt)
 
-    async def _ensure_client(self, *, cwd: str, model: str | None, permission_mode: str) -> None:
+    async def _ensure_client(
+        self, *, cwd: str, model: str | None, permission_mode: str, resume: str | None = None
+    ) -> None:
         if self._connected:
             return
         try:
@@ -69,6 +79,7 @@ class ClaudeProvider:
             can_use_tool=self._can_use_tool,
             system_prompt={"type": "preset", "preset": "claude_code"},
             setting_sources=["user", "project", "local"],
+            resume=resume or None,
         )
         self._client = ClaudeSDKClient(options=options)
         await self._client.connect()

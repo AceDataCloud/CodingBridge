@@ -92,7 +92,7 @@ All settings can come from the environment (see [.env.example](.env.example)):
 | `CODING_BRIDGE_HEARTBEAT_INTERVAL` | `15`                                             | Heartbeat seconds                        |
 | `CODING_BRIDGE_PERMISSION_TIMEOUT` | `300`                                            | Permission wait seconds (`0` = forever)  |
 | `CODING_BRIDGE_MODEL`              | —                                                | Default model                            |
-| `CODING_BRIDGE_CLAIM_URL`          | `https://nexior.acedata.cloud/bridge?code={code}`| Pairing claim link template              |
+| `CODING_BRIDGE_CLAIM_URL`          | `https://studio.acedata.cloud/coding-bridge?code={code}`| Pairing claim link template      |
 
 CLI flags override environment values.
 

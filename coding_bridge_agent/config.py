@@ -8,7 +8,7 @@ from pathlib import Path
 
 DEFAULT_BRIDGE_URL = "https://coding-bridge.acedata.cloud"
 DEFAULT_CONFIG_DIR = "~/.ace-bridge"
-DEFAULT_CLAIM_URL = "https://nexior.acedata.cloud/bridge?code={code}"
+DEFAULT_CLAIM_URL = "https://studio.acedata.cloud/coding-bridge?code={code}"
 
 
 def _default_node_name() -> str:

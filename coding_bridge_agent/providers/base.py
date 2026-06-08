@@ -16,7 +16,13 @@ class Provider(Protocol):
     name: str
 
     async def start(
-        self, prompt: str, *, cwd: str, model: str | None, permission_mode: str
+        self,
+        prompt: str,
+        *,
+        cwd: str,
+        model: str | None,
+        permission_mode: str,
+        resume: str | None = None,
     ) -> None: ...
 
     async def send(self, prompt: str) -> None: ...

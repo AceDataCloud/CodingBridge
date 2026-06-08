@@ -49,6 +49,8 @@ class Action:
     SESSION_CLOSE = "session.close"
     PERMISSION_RESOLVE = "permission.resolve"
     SESSIONS_LIST = "sessions.list"
+    HISTORY_LIST = "history.list"
+    HISTORY_GET = "history.get"
     PING = "ping"
 
 
@@ -66,6 +68,8 @@ class Event:
     SESSION_ERROR = "session.error"
     SESSION_CLOSED = "session.closed"
     SESSIONS_SNAPSHOT = "sessions.snapshot"
+    HISTORY_SNAPSHOT = "history.snapshot"
+    HISTORY_DETAIL = "history.detail"
     PONG = "pong"
 
 

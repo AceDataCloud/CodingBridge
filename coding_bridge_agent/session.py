@@ -22,12 +22,14 @@ class Session:
         cwd: str,
         model: str | None,
         permission_mode: str,
+        resume: str | None = None,
     ) -> None:
         self.session_id = session_id
         self.status = "idle"
         self.cwd = cwd
         self.model = model
         self.permission_mode = permission_mode
+        self.resume = resume
         self._emit = emit
         self._settings = settings
         self._broker = PermissionBroker()
@@ -62,7 +64,11 @@ class Session:
         )
         self._spawn(
             self._provider.start(
-                prompt, cwd=self.cwd, model=self.model, permission_mode=self.permission_mode
+                prompt,
+                cwd=self.cwd,
+                model=self.model,
+                permission_mode=self.permission_mode,
+                resume=self.resume,
             )
         )
 

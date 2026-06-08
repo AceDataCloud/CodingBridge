@@ -130,6 +130,12 @@ CLI flags override environment values.
 - **coding-bridge-agent** (this repo) — the node daemon you run locally.
 - **Nexior** — the web/mobile UI that pairs nodes and renders sessions.
 
+The node is the source of truth for the options the UI offers: it answers
+`capabilities.get` with the providers it supports and each one's models, effort
+tiers, and permission modes (see [`capabilities.py`](coding_bridge_agent/capabilities.py)).
+The browser renders whatever the node reports, so adding a model is a node-side
+change — never a web rebuild.
+
 The wire protocol (envelope `type`s, the inner `Action`/`Event` sub-protocol)
 is documented in [`coding_bridge_agent/protocol.py`](coding_bridge_agent/protocol.py).
 

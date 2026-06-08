@@ -12,7 +12,7 @@ import logging
 
 import websockets
 
-from . import fs, history, protocol
+from . import capabilities, fs, history, protocol
 from .config import Settings
 from .protocol import Action, Event, event_payload
 from .providers import KNOWN_PROVIDERS, default_provider_factory
@@ -42,7 +42,9 @@ class BridgeConnection:
         self._stop = asyncio.Event()
 
     def capabilities(self) -> list[str]:
-        return ["claude", "codex", "history"]
+        # Reflect the providers whose CLI is actually installed, plus history.
+        providers = [p["name"] for p in capabilities.describe()["providers"] if p["available"]]
+        return [*providers, "history"]
 
     def stop(self) -> None:
         self._stop.set()
@@ -148,6 +150,8 @@ class BridgeConnection:
                 await self._send_history_detail(payload)
             elif action == Action.FS_LIST:
                 await self._send_fs_list(payload)
+            elif action == Action.CAPABILITIES_GET:
+                await self._send_capabilities()
             elif action == Action.PING:
                 await self.send_payload(event_payload(Event.PONG))
             else:
@@ -261,6 +265,9 @@ class BridgeConnection:
             show_hidden=bool(payload.get("show_hidden")),
         )
         await self.send_payload(event_payload(Event.FS_LIST, **result))
+
+    async def _send_capabilities(self) -> None:
+        await self.send_payload(event_payload(Event.CAPABILITIES, **capabilities.describe()))
 
     async def aclose(self) -> None:
         for session in list(self.sessions.values()):

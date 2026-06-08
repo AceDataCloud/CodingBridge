@@ -1,14 +1,15 @@
 # Coding Bridge Agent
 
-Run **Claude Code** on your own machine and drive it from the AceDataCloud web
-app (Nexior) or your phone — without exposing your machine to the internet.
+Run **Claude Code** or **OpenAI Codex** on your own machine and drive it from the
+AceDataCloud web app (Nexior) or your phone — without exposing your machine to
+the internet.
 
 The agent is a small, outbound-only daemon. It connects to the
 [coding-bridge](https://coding-bridge.acedata.cloud) relay, registers your
-machine as a *node*, and runs local Claude Code sessions on your behalf. Code
-execution, file access, and tool permissions all stay **local**. The bridge only
-relays JSON messages between your browser and this daemon; it never sees your
-files and never runs anything.
+machine as a *node*, and runs local Claude Code or Codex sessions on your behalf.
+Code execution, file access, and tool permissions all stay **local**. The bridge
+only relays JSON messages between your browser and this daemon; it never sees
+your files and never runs anything.
 
 ```
 ┌────────────┐   wss (Ace JWT)   ┌───────────────┐   wss (node token)   ┌──────────────────────┐
@@ -33,6 +34,12 @@ Requires Python 3.10+ and a working
 [Claude Code](https://docs.claude.com/en/docs/claude-code) installation (the
 agent uses `claude-agent-sdk`, which drives your local Claude Code CLI and
 authentication).
+
+To use the **Codex** provider, also install the
+[Codex CLI](https://github.com/openai/codex) and sign in (`codex login`). Codex
+sessions run via `codex exec`, so the session permission mode maps to a Codex
+sandbox policy (plan → read-only, default/acceptEdits → workspace-write,
+bypassPermissions → danger-full-access).
 
 ```bash
 pipx install coding-bridge-agent      # recommended

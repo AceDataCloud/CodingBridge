@@ -22,19 +22,23 @@ class Session:
         cwd: str,
         model: str | None,
         permission_mode: str,
+        provider: str = "claude",
+        effort: str | None = None,
         resume: str | None = None,
     ) -> None:
         self.session_id = session_id
         self.status = "idle"
+        self.provider = provider
         self.cwd = cwd
         self.model = model
         self.permission_mode = permission_mode
+        self.effort = effort
         self.resume = resume
         self._emit = emit
         self._settings = settings
         self._broker = PermissionBroker()
         ask: AskPermissionFn = self._ask_permission
-        self._provider = provider_factory(session_id, emit, ask)
+        self._provider = provider_factory(provider, session_id, emit, ask)
         self._task: asyncio.Task[None] | None = None
 
     async def _ask_permission(
@@ -60,7 +64,13 @@ class Session:
 
     async def start(self, prompt: str) -> None:
         await self._emit(
-            event_payload(Event.SESSION_STARTED, self.session_id, cwd=self.cwd, model=self.model)
+            event_payload(
+                Event.SESSION_STARTED,
+                self.session_id,
+                cwd=self.cwd,
+                model=self.model,
+                provider=self.provider,
+            )
         )
         self._spawn(
             self._provider.start(
@@ -68,6 +78,7 @@ class Session:
                 cwd=self.cwd,
                 model=self.model,
                 permission_mode=self.permission_mode,
+                effort=self.effort,
                 resume=self.resume,
             )
         )
@@ -114,6 +125,7 @@ class Session:
         return {
             "session_id": self.session_id,
             "status": self.status,
+            "provider": self.provider,
             "cwd": self.cwd,
             "model": self.model,
         }

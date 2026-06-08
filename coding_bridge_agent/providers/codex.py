@@ -1,0 +1,264 @@
+"""Codex provider backed by the ``codex exec --json`` CLI.
+
+Runs OpenAI Codex non-interactively and relays its JSONL event stream as the same
+inner events the Claude provider emits. ``codex exec`` is non-interactive, so the
+session ``permission_mode`` maps to a sandbox policy rather than per-tool prompts.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import contextlib
+import json
+import logging
+import shutil
+from typing import TYPE_CHECKING, Any
+
+from ..protocol import Event, event_payload
+
+if TYPE_CHECKING:
+    from ..config import Settings
+    from .base import AskPermissionFn, EmitFn
+
+logger = logging.getLogger("coding-bridge-agent.codex")
+
+# permission_mode -> codex sandbox policy (exec has no interactive approvals).
+_SANDBOX_BY_MODE = {
+    "plan": "read-only",
+    "default": "workspace-write",
+    "acceptEdits": "workspace-write",
+    "bypassPermissions": "danger-full-access",
+}
+_DEFAULT_SANDBOX = "workspace-write"
+_EFFORT_ALIASES = {"max": "high", "ultra-high": "high", "ultrahigh": "high"}
+_EFFORT_VALUES = {"minimal", "low", "medium", "high"}
+
+
+def _codex_effort(effort: str | None) -> str | None:
+    if not effort:
+        return None
+    value = _EFFORT_ALIASES.get(effort, effort)
+    return value if value in _EFFORT_VALUES else None
+
+
+class CodexProvider:
+    name = "codex"
+
+    def __init__(
+        self,
+        session_id: str,
+        emit: EmitFn,
+        ask_permission: AskPermissionFn,
+        settings: Settings,
+    ) -> None:
+        self._session_id = session_id
+        self._emit = emit
+        self._ask = ask_permission  # exec is non-interactive; kept for protocol parity
+        self._settings = settings
+        self._cwd = settings.default_cwd
+        self._model: str | None = settings.default_model
+        self._sandbox = _DEFAULT_SANDBOX
+        self._effort: str | None = None
+        self._thread_id: str | None = None
+        self._last_error: str | None = None
+        self._proc: asyncio.subprocess.Process | None = None
+
+    async def start(
+        self,
+        prompt: str,
+        *,
+        cwd: str,
+        model: str | None,
+        permission_mode: str,
+        effort: str | None = None,
+        resume: str | None = None,
+    ) -> None:
+        self._cwd = cwd or self._settings.default_cwd
+        self._model = model
+        self._sandbox = _SANDBOX_BY_MODE.get(permission_mode, _DEFAULT_SANDBOX)
+        self._effort = _codex_effort(effort)
+        self._thread_id = resume or None
+        await self._run_turn(prompt, resume=bool(resume))
+
+    async def send(self, prompt: str) -> None:
+        await self._run_turn(prompt, resume=self._thread_id is not None)
+
+    def _build_argv(self, prompt: str, *, resume: bool) -> list[str]:
+        argv = ["codex", "exec"]
+        if resume and self._thread_id:
+            argv += ["resume", self._thread_id]
+        argv += ["--json", "--skip-git-repo-check", "-s", self._sandbox]
+        if self._model:
+            argv += ["-m", self._model]
+        if self._effort:
+            argv += ["-c", f"model_reasoning_effort={self._effort}"]
+        argv.append(prompt)
+        return argv
+
+    async def _run_turn(self, prompt: str, *, resume: bool) -> None:
+        if shutil.which("codex") is None:
+            raise RuntimeError(
+                "codex CLI is not installed; install it from https://github.com/openai/codex"
+            )
+        argv = self._build_argv(prompt, resume=resume)
+        self._proc = await asyncio.create_subprocess_exec(
+            *argv,
+            cwd=self._cwd or None,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        proc = self._proc
+        stderr_tail: list[str] = []
+        drain = asyncio.create_task(self._drain_stderr(proc, stderr_tail))
+        self._last_error = None
+        saw_result = False
+        try:
+            assert proc.stdout is not None
+            while True:
+                raw = await proc.stdout.readline()
+                if not raw:
+                    break
+                line = raw.decode("utf-8", "replace").strip()
+                if not line:
+                    continue
+                try:
+                    obj = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if await self._handle_event(obj):
+                    saw_result = True
+        finally:
+            await proc.wait()
+            drain.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await drain
+            self._proc = None
+        if proc.returncode not in (0, None) and not saw_result:
+            detail = (
+                self._last_error
+                or " ".join(stderr_tail[-5:]).strip()
+                or f"codex exited with {proc.returncode}"
+            )
+            await self._emit(event_payload(Event.SESSION_ERROR, self._session_id, message=detail))
+
+    async def _drain_stderr(self, proc: asyncio.subprocess.Process, tail: list[str]) -> None:
+        if proc.stderr is None:
+            return
+        with contextlib.suppress(asyncio.CancelledError):
+            while True:
+                raw = await proc.stderr.readline()
+                if not raw:
+                    return
+                tail.append(raw.decode("utf-8", "replace").rstrip())
+                del tail[:-20]
+
+    async def _handle_event(self, obj: dict[str, Any]) -> bool:
+        """Map one codex JSONL event; returns True when it ends a turn."""
+        kind = obj.get("type")
+        if kind == "thread.started":
+            self._thread_id = obj.get("thread_id") or self._thread_id
+        elif kind in ("item.started", "item.updated", "item.completed"):
+            await self._handle_item(kind, obj.get("item") or {})
+        elif kind == "turn.completed":
+            await self._emit(
+                event_payload(
+                    Event.SESSION_RESULT,
+                    self._session_id,
+                    subtype="turn_complete",
+                    is_error=False,
+                    usage=obj.get("usage"),
+                )
+            )
+            return True
+        elif kind == "turn.failed":
+            message = _error_message(obj) or "codex turn failed"
+            await self._emit(event_payload(Event.SESSION_ERROR, self._session_id, message=message))
+            return True
+        elif kind == "error":
+            # Transient stream notice (e.g. "Reconnecting... 2/5"); the turn often
+            # recovers. Remember the last one and only surface it if the process
+            # exits without completing a turn.
+            self._last_error = _error_message(obj) or self._last_error
+        return False
+
+    async def _handle_item(self, phase: str, item: dict[str, Any]) -> None:
+        itype = item.get("type")
+        completed = phase == "item.completed"
+        if itype == "agent_message":
+            text = item.get("text")
+            if completed and text:
+                await self._emit(event_payload(Event.SESSION_TEXT, self._session_id, text=text))
+        elif itype == "reasoning":
+            text = item.get("text")
+            if completed and text:
+                await self._emit(event_payload(Event.SESSION_THINKING, self._session_id, text=text))
+        elif itype == "command_execution":
+            if phase == "item.started":
+                await self._emit(
+                    event_payload(
+                        Event.SESSION_TOOL_USE,
+                        self._session_id,
+                        tool="shell",
+                        tool_use_id=item.get("id"),
+                        input={"command": item.get("command")},
+                    )
+                )
+            elif completed:
+                await self._emit(
+                    event_payload(
+                        Event.SESSION_TOOL_RESULT,
+                        self._session_id,
+                        tool_use_id=item.get("id"),
+                        content=item.get("aggregated_output") or item.get("output"),
+                        is_error=item.get("exit_code") not in (0, None),
+                    )
+                )
+        elif itype in ("file_change", "patch"):
+            if completed:
+                await self._emit(
+                    event_payload(
+                        Event.SESSION_TOOL_USE,
+                        self._session_id,
+                        tool="edit",
+                        tool_use_id=item.get("id"),
+                        input={"changes": item.get("changes")},
+                    )
+                )
+        elif itype == "mcp_tool_call":
+            if completed:
+                await self._emit(
+                    event_payload(
+                        Event.SESSION_TOOL_USE,
+                        self._session_id,
+                        tool=item.get("tool") or "mcp",
+                        tool_use_id=item.get("id"),
+                        input=item.get("arguments"),
+                    )
+                )
+        elif completed and item.get("text"):
+            await self._emit(event_payload(Event.SESSION_TEXT, self._session_id, text=item["text"]))
+
+    async def interrupt(self) -> None:
+        proc = self._proc
+        if proc is None or proc.returncode is not None:
+            return
+        with contextlib.suppress(ProcessLookupError):
+            proc.terminate()
+
+    async def aclose(self) -> None:
+        proc = self._proc
+        if proc is not None and proc.returncode is None:
+            with contextlib.suppress(ProcessLookupError):
+                proc.kill()
+            with contextlib.suppress(Exception):
+                await proc.wait()
+        self._proc = None
+
+
+def _error_message(obj: dict[str, Any]) -> str | None:
+    error = obj.get("error")
+    if isinstance(error, dict):
+        return error.get("message")
+    if isinstance(error, str):
+        return error
+    return obj.get("message")

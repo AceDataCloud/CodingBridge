@@ -10,17 +10,20 @@ from coding_bridge_agent.protocol import Action, Event
 class FakeProvider:
     name = "fake"
 
-    def __init__(self, session_id, emit, ask):
+    def __init__(self, provider, session_id, emit, ask):
+        self.provider = provider
         self.session_id = session_id
         self.emit = emit
         self.ask = ask
         self.prompts = []
         self.resume = None
+        self.effort = None
         self.closed = False
 
-    async def start(self, prompt, *, cwd, model, permission_mode, resume=None):
+    async def start(self, prompt, *, cwd, model, permission_mode, effort=None, resume=None):
         self.prompts.append(prompt)
         self.resume = resume
+        self.effort = effort
 
     async def send(self, prompt):
         self.prompts.append(prompt)
@@ -32,8 +35,8 @@ class FakeProvider:
         self.closed = True
 
 
-def fake_factory(session_id, emit, ask):
-    return FakeProvider(session_id, emit, ask)
+def fake_factory(provider, session_id, emit, ask):
+    return FakeProvider(provider, session_id, emit, ask)
 
 
 class FakeWS:
@@ -84,9 +87,7 @@ async def test_permission_resolve_routes_to_session():
     await asyncio.sleep(0)
 
     requests = [
-        m["payload"]
-        for m in conn._ws.sent
-        if m["payload"].get("event") == Event.PERMISSION_REQUEST
+        m["payload"] for m in conn._ws.sent if m["payload"].get("event") == Event.PERMISSION_REQUEST
     ]
     assert requests
     request_id = requests[0]["request_id"]
@@ -129,10 +130,27 @@ async def test_start_forwards_resume_session_id():
 async def test_start_rejects_unsupported_provider():
     conn = _new_conn()
     await conn._dispatch(
-        {"action": Action.SESSION_START, "session_id": "s1", "prompt": "x", "provider": "codex"}
+        {"action": Action.SESSION_START, "session_id": "s1", "prompt": "x", "provider": "bogus"}
     )
     assert "s1" not in conn.sessions
     assert Event.SESSION_ERROR in _events(conn)
+
+
+async def test_start_accepts_codex_provider():
+    conn = _new_conn()
+    await conn._dispatch(
+        {
+            "action": Action.SESSION_START,
+            "session_id": "s1",
+            "prompt": "x",
+            "provider": "codex",
+            "effort": "high",
+        }
+    )
+    await asyncio.sleep(0.01)
+    assert "s1" in conn.sessions
+    assert conn.sessions["s1"].provider == "codex"
+    assert conn.sessions["s1"]._provider.effort == "high"
 
 
 async def test_sessions_list_snapshot():
@@ -141,9 +159,7 @@ async def test_sessions_list_snapshot():
     conn._ws.sent.clear()
     await conn._dispatch({"action": Action.SESSIONS_LIST})
     snapshots = [
-        m["payload"]
-        for m in conn._ws.sent
-        if m["payload"].get("event") == Event.SESSIONS_SNAPSHOT
+        m["payload"] for m in conn._ws.sent if m["payload"].get("event") == Event.SESSIONS_SNAPSHOT
     ]
     assert snapshots
     assert snapshots[0]["sessions"][0]["session_id"] == "s1"

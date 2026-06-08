@@ -22,6 +22,7 @@ class Provider(Protocol):
         cwd: str,
         model: str | None,
         permission_mode: str,
+        effort: str | None = None,
         resume: str | None = None,
     ) -> None: ...
 
@@ -32,5 +33,5 @@ class Provider(Protocol):
     async def aclose(self) -> None: ...
 
 
-# (session_id, emit, ask_permission) -> Provider.
-ProviderFactory = Callable[[str, EmitFn, AskPermissionFn], Provider]
+# (provider_name, session_id, emit, ask_permission) -> Provider.
+ProviderFactory = Callable[[str, str, EmitFn, AskPermissionFn], Provider]

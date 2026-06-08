@@ -15,7 +15,7 @@ import websockets
 from . import history, protocol
 from .config import Settings
 from .protocol import Action, Event, event_payload
-from .providers import default_provider_factory
+from .providers import KNOWN_PROVIDERS, default_provider_factory
 from .providers.base import ProviderFactory
 from .session import Session
 
@@ -42,7 +42,7 @@ class BridgeConnection:
         self._stop = asyncio.Event()
 
     def capabilities(self) -> list[str]:
-        return ["claude", "history"]
+        return ["claude", "codex", "history"]
 
     def stop(self) -> None:
         self._stop.set()
@@ -166,12 +166,12 @@ class BridgeConnection:
             )
             return
         provider = payload.get("provider") or "claude"
-        if provider != "claude":
+        if provider not in KNOWN_PROVIDERS:
             await self.send_payload(
                 event_payload(
                     Event.SESSION_ERROR,
                     session_id,
-                    message=f"live sessions not supported for provider: {provider}",
+                    message=f"unsupported provider: {provider}",
                 )
             )
             return
@@ -187,6 +187,8 @@ class BridgeConnection:
             cwd=payload.get("cwd") or self.settings.default_cwd,
             model=payload.get("model") or self.settings.default_model,
             permission_mode=payload.get("permission_mode") or "default",
+            provider=provider,
+            effort=payload.get("effort") or None,
             resume=payload.get("resume_session_id") or None,
         )
         self.sessions[session_id] = session

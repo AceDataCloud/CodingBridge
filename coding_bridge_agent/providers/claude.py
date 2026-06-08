@@ -5,6 +5,7 @@ decision to a remote approver — follows the approach pioneered by VibeBridge.
 This is an independent implementation against the public Agent SDK; no VibeBridge
 source is included.
 """
+
 from __future__ import annotations
 
 import contextlib
@@ -45,10 +46,11 @@ class ClaudeProvider:
         cwd: str,
         model: str | None,
         permission_mode: str,
+        effort: str | None = None,
         resume: str | None = None,
     ) -> None:
         await self._ensure_client(
-            cwd=cwd, model=model, permission_mode=permission_mode, resume=resume
+            cwd=cwd, model=model, permission_mode=permission_mode, effort=effort, resume=resume
         )
         await self._turn(prompt)
 
@@ -62,7 +64,13 @@ class ClaudeProvider:
         await self._turn(prompt)
 
     async def _ensure_client(
-        self, *, cwd: str, model: str | None, permission_mode: str, resume: str | None = None
+        self,
+        *,
+        cwd: str,
+        model: str | None,
+        permission_mode: str,
+        effort: str | None = None,
+        resume: str | None = None,
     ) -> None:
         if self._connected:
             return
@@ -81,6 +89,7 @@ class ClaudeProvider:
             setting_sources=["user", "project", "local"],
             resume=resume or None,
         )
+        _apply_effort(options, effort)
         self._client = ClaudeSDKClient(options=options)
         await self._client.connect()
         self._connected = True
@@ -170,3 +179,18 @@ def _stringify(content: Any) -> Any:
         return json.dumps(content, ensure_ascii=False)
     except (TypeError, ValueError):
         return str(content)
+
+
+_CLAUDE_EFFORT_ALIASES = {"ultra-high": "max", "ultrahigh": "max", "minimal": "low"}
+_CLAUDE_EFFORT_VALUES = {"low", "medium", "high", "max"}
+
+
+def _apply_effort(options: Any, effort: str | None) -> None:
+    """Set the SDK reasoning effort if the installed SDK exposes the field."""
+    if not effort:
+        return
+    value = _CLAUDE_EFFORT_ALIASES.get(effort, effort)
+    if value not in _CLAUDE_EFFORT_VALUES or not hasattr(options, "effort"):
+        return
+    with contextlib.suppress(Exception):  # frozen-dataclass SDKs
+        options.effort = value

@@ -13,6 +13,7 @@ import json
 import logging
 from typing import TYPE_CHECKING, Any
 
+from .. import images as image_store
 from ..protocol import Event, event_payload
 
 if TYPE_CHECKING:
@@ -36,6 +37,7 @@ class ClaudeProvider:
         self._emit = emit
         self._ask = ask_permission
         self._settings = settings
+        self._cwd = settings.default_cwd
         self._client: Any = None
         self._connected = False
 
@@ -47,21 +49,23 @@ class ClaudeProvider:
         model: str | None,
         permission_mode: str,
         effort: str | None = None,
+        images: list | None = None,
         resume: str | None = None,
     ) -> None:
+        self._cwd = cwd or self._settings.default_cwd
         await self._ensure_client(
             cwd=cwd, model=model, permission_mode=permission_mode, effort=effort, resume=resume
         )
-        await self._turn(prompt)
+        await self._turn(self._with_images(prompt, images))
 
-    async def send(self, prompt: str) -> None:
+    async def send(self, prompt: str, *, images: list | None = None) -> None:
         if not self._connected:
             await self._ensure_client(
                 cwd=self._settings.default_cwd,
                 model=self._settings.default_model,
                 permission_mode="default",
             )
-        await self._turn(prompt)
+        await self._turn(self._with_images(prompt, images))
 
     async def _ensure_client(
         self,
@@ -98,6 +102,14 @@ class ClaudeProvider:
         await self._client.query(prompt)
         async for message in self._client.receive_response():
             await self._handle_message(message)
+
+    def _with_images(self, prompt: str, images: list | None) -> str:
+        paths = image_store.save_images(images, self._cwd, session_id=self._session_id)
+        if not paths:
+            return prompt
+        listing = "\n".join(f"{i + 1}. {p}" for i, p in enumerate(paths))
+        note = f"[Images provided at the following paths:]\n{listing}"
+        return f"{prompt}\n\n{note}" if prompt else note
 
     async def _handle_message(self, message: Any) -> None:
         content = getattr(message, "content", None)

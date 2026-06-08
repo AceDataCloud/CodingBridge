@@ -14,6 +14,7 @@ import logging
 import shutil
 from typing import TYPE_CHECKING, Any
 
+from .. import images as image_store
 from ..protocol import Event, event_payload
 
 if TYPE_CHECKING:
@@ -71,6 +72,7 @@ class CodexProvider:
         model: str | None,
         permission_mode: str,
         effort: str | None = None,
+        images: list | None = None,
         resume: str | None = None,
     ) -> None:
         self._cwd = cwd or self._settings.default_cwd
@@ -78,12 +80,12 @@ class CodexProvider:
         self._sandbox = _SANDBOX_BY_MODE.get(permission_mode, _DEFAULT_SANDBOX)
         self._effort = _codex_effort(effort)
         self._thread_id = resume or None
-        await self._run_turn(prompt, resume=bool(resume))
+        await self._run_turn(prompt, resume=bool(resume), images=images)
 
-    async def send(self, prompt: str) -> None:
-        await self._run_turn(prompt, resume=self._thread_id is not None)
+    async def send(self, prompt: str, *, images: list | None = None) -> None:
+        await self._run_turn(prompt, resume=self._thread_id is not None, images=images)
 
-    def _build_argv(self, prompt: str, *, resume: bool) -> list[str]:
+    def _build_argv(self, prompt: str, *, resume: bool, image_paths: list[str]) -> list[str]:
         argv = ["codex", "exec"]
         if resume and self._thread_id:
             argv += ["resume", self._thread_id]
@@ -92,15 +94,18 @@ class CodexProvider:
             argv += ["-m", self._model]
         if self._effort:
             argv += ["-c", f"model_reasoning_effort={self._effort}"]
+        for path in image_paths:
+            argv += ["-i", path]
         argv.append(prompt)
         return argv
 
-    async def _run_turn(self, prompt: str, *, resume: bool) -> None:
+    async def _run_turn(self, prompt: str, *, resume: bool, images: list | None = None) -> None:
         if shutil.which("codex") is None:
             raise RuntimeError(
                 "codex CLI is not installed; install it from https://github.com/openai/codex"
             )
-        argv = self._build_argv(prompt, resume=resume)
+        image_paths = image_store.save_images(images, self._cwd, session_id=self._session_id)
+        argv = self._build_argv(prompt, resume=resume, image_paths=image_paths)
         self._proc = await asyncio.create_subprocess_exec(
             *argv,
             cwd=self._cwd or None,

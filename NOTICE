@@ -2,9 +2,9 @@ Coding Bridge Agent
 Copyright (C) 2026 AceDataCloud
 
 This program is free software: you can redistribute it and/or modify it under
-the terms of the GNU General Public License as published by the Free Software
-Foundation, either version 3 of the License, or (at your option) any later
-version. See the LICENSE file for the full text.
+the terms of the GNU Affero General Public License as published by the Free
+Software Foundation, either version 3 of the License, or (at your option) any
+later version. See the LICENSE file for the full text.
 
 ------------------------------------------------------------------------------
 Attribution
@@ -13,5 +13,5 @@ Attribution
 This project is an independent implementation. Its remote permission-relay
 design — forwarding a coding agent's tool-approval decision to a remote
 approver over a WebSocket — was inspired by VibeBridge
-(https://github.com/Swayyyyy/VibeBridge), which is also licensed under
+(https://github.com/Swayyyyy/VibeBridge), which is licensed under
 GPL-3.0. No VibeBridge source code is included in this repository.

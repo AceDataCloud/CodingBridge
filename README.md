@@ -132,10 +132,10 @@ pytest -q
 
 ## Attribution & license
 
-This project is licensed under **GPL-3.0-or-later** (see [LICENSE](LICENSE)).
+This project is licensed under **AGPL-3.0-or-later** (see [LICENSE](LICENSE)).
 
 The remote permission-relay design — forwarding a coding agent's tool-approval
 decision to a remote approver — was inspired by
-[VibeBridge](https://github.com/Swayyyyy/VibeBridge) (also GPL-3.0). This is an
+[VibeBridge](https://github.com/Swayyyyy/VibeBridge) (GPL-3.0). This is an
 independent implementation built on the public `claude-agent-sdk`; **no
 VibeBridge source code is included.** See [NOTICE](NOTICE).

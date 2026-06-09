@@ -4,6 +4,23 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable
 from typing import Any, Protocol
 
+
+def slash_name(prompt: str) -> str | None:
+    """Extract a slash-command name, or None if the prompt isn't a command.
+
+    A command is a leading ``/`` followed by a single token with no further
+    ``/`` (so filesystem-like text such as ``/Users/x`` stays a normal prompt).
+    """
+    text = (prompt or "").strip()
+    if not text.startswith("/") or len(text) < 2:
+        return None
+    first = text.split()[0]
+    body = first[1:]
+    if not body or "/" in body:
+        return None
+    return body.lower()
+
+
 # Sends an inner event payload toward the browser.
 EmitFn = Callable[[dict[str, Any]], Awaitable[None]]
 # (tool_name, tool_input, context) -> "allow" | "deny".

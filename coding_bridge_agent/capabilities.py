@@ -5,11 +5,24 @@ with the providers it supports, the models/effort tiers/permission modes each
 one offers, and whether the backing CLI is installed. The catalogs live HERE,
 on the node, so a new model or effort tier only needs a node update (or a custom
 value typed in the box) — the web UI renders whatever the node reports.
+
+Each provider also advertises its slash `commands`. For Claude these come from
+the SDK's per-environment `get_server_info()` — the authoritative list of what
+actually runs headlessly (built-ins like `/context`, `/compact`, plus the user's
+own `.claude/commands`). The browser uses it for `/` autocomplete so the user
+discovers exactly what their machine supports.
 """
 from __future__ import annotations
 
+import asyncio
+import contextlib
+import logging
+import os
 import shutil
+from pathlib import Path
 from typing import Any
+
+logger = logging.getLogger("coding-bridge-agent.capabilities")
 
 # Per-provider model catalogs. Labels are proper nouns shown verbatim by the
 # browser; `value` is what we pass to the CLI. Update this list (or ship a new
@@ -60,3 +73,128 @@ def describe() -> dict[str, Any]:
             _provider("codex", "Codex", "codex", _CODEX_MODELS, _CODEX_EFFORTS),
         ],
     }
+
+
+async def describe_detailed(settings: Any) -> dict[str, Any]:
+    """`describe()` enriched with each provider's slash-command catalog.
+
+    Claude's catalog is fetched once from the SDK (cached); Codex's is derived
+    from its local custom-prompt directory. Falls back to an empty catalog if a
+    backend is unavailable or probing fails — the UI just shows no autocomplete.
+    """
+    desc = describe()
+    claude_commands = await _claude_commands(settings)
+    codex_commands = _codex_commands()
+    for provider in desc["providers"]:
+        if provider["name"] == "claude":
+            provider["commands"] = claude_commands
+        elif provider["name"] == "codex":
+            provider["commands"] = codex_commands
+    return desc
+
+
+def normalize_commands(info: dict[str, Any] | None) -> list[dict[str, Any]]:
+    """Map a `get_server_info()` payload to the wire shape the browser expects."""
+    raw = (info or {}).get("commands") or []
+    out: list[dict[str, Any]] = []
+    for entry in raw:
+        if not isinstance(entry, dict):
+            continue
+        name = entry.get("name")
+        if not name or not isinstance(name, str):
+            continue
+        aliases = [a for a in (entry.get("aliases") or []) if isinstance(a, str)]
+        out.append(
+            {
+                "name": name,
+                "description": entry.get("description") or "",
+                "argument_hint": entry.get("argumentHint") or entry.get("argument_hint") or "",
+                "aliases": aliases,
+            }
+        )
+    return out
+
+
+def command_name_set(commands: list[dict[str, Any]] | None) -> set[str]:
+    """Lower-cased set of every command name and alias, for fast membership checks."""
+    names: set[str] = set()
+    for cmd in commands or []:
+        name = cmd.get("name")
+        if isinstance(name, str):
+            names.add(name.lower())
+        for alias in cmd.get("aliases") or []:
+            if isinstance(alias, str):
+                names.add(alias.lower())
+    return names
+
+
+_claude_commands_cache: list[dict[str, Any]] | None = None
+_claude_commands_lock = asyncio.Lock()
+
+
+async def _claude_commands(settings: Any) -> list[dict[str, Any]]:
+    """Fetch Claude's per-environment slash-command catalog once and cache it.
+
+    Spins up a throwaway streaming SDK client purely to read the `initialize`
+    response (`get_server_info()`), which lists every command the CLI accepts in
+    this environment. Cheap enough to do once on the first `capabilities.get`.
+    """
+    global _claude_commands_cache
+    if _claude_commands_cache is not None:
+        return _claude_commands_cache
+    async with _claude_commands_lock:
+        if _claude_commands_cache is not None:
+            return _claude_commands_cache
+        commands = await _probe_claude_commands(settings)
+        _claude_commands_cache = commands
+        return commands
+
+
+async def _probe_claude_commands(settings: Any) -> list[dict[str, Any]]:
+    if shutil.which("claude") is None:
+        return []
+    try:
+        from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient
+    except ImportError:
+        return []
+    try:
+        options = ClaudeAgentOptions(
+            cwd=(getattr(settings, "default_cwd", "") or None),
+            system_prompt={"type": "preset", "preset": "claude_code"},
+            setting_sources=["user", "project", "local"],
+        )
+        client = ClaudeSDKClient(options=options)
+        await asyncio.wait_for(client.connect(), timeout=45)
+        try:
+            info = await asyncio.wait_for(client.get_server_info(), timeout=15)
+        finally:
+            with contextlib.suppress(Exception):
+                await client.disconnect()
+        return normalize_commands(info)
+    except Exception as exc:  # noqa: BLE001 - never let probing break capabilities
+        logger.warning("could not probe claude commands: %s", exc)
+        return []
+
+
+def _codex_commands() -> list[dict[str, Any]]:
+    """Codex custom prompts (`$CODEX_HOME/prompts/*.md`) surfaced as slash commands.
+
+    `codex exec` is non-interactive and has no built-in slash processor, so only
+    user-defined prompt files are advertised; the rest of Codex's interactive
+    slash commands cannot run remotely.
+    """
+    home = os.environ.get("CODEX_HOME") or os.path.join(os.path.expanduser("~"), ".codex")
+    prompts_dir = Path(home) / "prompts"
+    if not prompts_dir.is_dir():
+        return []
+    commands: list[dict[str, Any]] = []
+    try:
+        entries = sorted(prompts_dir.glob("*.md"))
+    except OSError:
+        return []
+    for path in entries:
+        name = path.stem
+        if not name:
+            continue
+        commands.append({"name": name, "description": "", "argument_hint": "", "aliases": []})
+    return commands

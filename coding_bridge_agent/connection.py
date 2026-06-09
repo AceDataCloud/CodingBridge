@@ -279,7 +279,8 @@ class BridgeConnection:
         await self.send_payload(event_payload(Event.FS_LIST, **result))
 
     async def _send_capabilities(self) -> None:
-        await self.send_payload(event_payload(Event.CAPABILITIES, **capabilities.describe()))
+        descriptor = await capabilities.describe_detailed(self.settings)
+        await self.send_payload(event_payload(Event.CAPABILITIES, **descriptor))
 
     async def aclose(self) -> None:
         for session in list(self.sessions.values()):

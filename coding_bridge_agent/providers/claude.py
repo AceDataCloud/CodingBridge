@@ -14,14 +14,19 @@ import logging
 from typing import TYPE_CHECKING, Any
 
 from .. import attachments as attachment_store
+from .. import capabilities
 from .. import images as image_store
 from ..protocol import Event, event_payload
+from .base import slash_name
 
 if TYPE_CHECKING:
     from ..config import Settings
     from .base import AskPermissionFn, EmitFn
 
 logger = logging.getLogger("coding-bridge-agent.claude")
+
+# Phrase the claude CLI returns for TUI-only commands it can't run headlessly.
+_UNAVAILABLE_SUFFIX = "isn't available in this environment."
 
 
 class ClaudeProvider:
@@ -39,10 +44,12 @@ class ClaudeProvider:
         self._ask = ask_permission
         self._settings = settings
         self._cwd = settings.default_cwd
+        self._model: str | None = settings.default_model
+        self._permission_mode = "default"
         self._client: Any = None
         self._connected = False
-        self._model: str | None = None
-        self._permission_mode = "default"
+        self._server_info: dict[str, Any] | None = None
+        self._known_commands: set[str] = set()
 
     async def start(
         self,
@@ -57,9 +64,13 @@ class ClaudeProvider:
         resume: str | None = None,
     ) -> None:
         self._cwd = cwd or self._settings.default_cwd
+        self._model = model
+        self._permission_mode = permission_mode or "default"
         await self._ensure_client(
             cwd=cwd, model=model, permission_mode=permission_mode, effort=effort, resume=resume
         )
+        if await self._maybe_handle_slash(prompt):
+            return
         await self._turn(self._with_attachments(prompt, images, attachments))
 
     async def send(
@@ -81,6 +92,8 @@ class ClaudeProvider:
             )
         else:
             await self._apply_runtime_changes(model, permission_mode)
+        if await self._maybe_handle_slash(prompt):
+            return
         await self._turn(self._with_attachments(prompt, images, attachments))
 
     async def _apply_runtime_changes(
@@ -136,6 +149,34 @@ class ClaudeProvider:
         self._connected = True
         self._model = model
         self._permission_mode = permission_mode or "default"
+        await self._load_server_info()
+
+    async def _load_server_info(self) -> None:
+        """Cache the initialize result so we know which slash commands run here."""
+        with contextlib.suppress(Exception):
+            self._server_info = await self._client.get_server_info()
+        self._known_commands = capabilities.command_name_set(
+            capabilities.normalize_commands(self._server_info)
+        )
+
+    async def _maybe_handle_slash(self, prompt: str) -> bool:
+        """Short-circuit slash commands the SDK can't run headlessly.
+
+        Returns True when the command was handled locally (a synthesized answer
+        or a localized notice), so the caller skips the normal SDK turn. With no
+        catalog yet we defer to the SDK and rely on the runtime fallback.
+        """
+        if not self._known_commands:
+            return False
+        name = slash_name(prompt)
+        if name is None or name in self._known_commands:
+            return False
+        if name == "status":
+            await self._emit_status()
+        else:
+            await self._emit_slash_notice(name)
+        await self._emit_result_done("notice")
+        return True
 
     async def _turn(self, prompt: str) -> None:
         await self._client.query(prompt)
@@ -159,16 +200,68 @@ class ClaudeProvider:
             return
         # ResultMessage marks the end of a turn.
         if hasattr(message, "subtype") and hasattr(message, "is_error"):
+            result = getattr(message, "result", None)
+            # Safety net: an unknown TUI-only command slipped past the catalog
+            # check. Swap the cryptic CLI string for a localized notice.
+            if isinstance(result, str) and result.rstrip().endswith(_UNAVAILABLE_SUFFIX):
+                await self._emit_slash_notice(_command_from_rejection(result))
+                result = None
             await self._emit(
                 event_payload(
                     Event.SESSION_RESULT,
                     self._session_id,
                     subtype=getattr(message, "subtype", None),
                     is_error=bool(getattr(message, "is_error", False)),
-                    result=getattr(message, "result", None),
+                    result=result,
                     cost_usd=getattr(message, "total_cost_usd", None),
                 )
             )
+
+    async def _emit_status(self) -> None:
+        """Synthesize a `/status` answer from the cached initialize info + session."""
+        info = self._server_info or {}
+        account = info.get("account") or {}
+        lines = ["## Status", ""]
+        email = account.get("email")
+        if email:
+            org = account.get("organization")
+            lines.append(f"- **Account:** {email} ({org})" if org else f"- **Account:** {email}")
+        subscription = account.get("subscriptionType")
+        if subscription:
+            lines.append(f"- **Subscription:** {subscription}")
+        if self._model:
+            lines.append(f"- **Model:** {self._model}")
+        lines.append(f"- **Permission mode:** {self._permission_mode}")
+        lines.append(f"- **Working directory:** {self._cwd or self._settings.default_cwd}")
+        await self._emit(
+            event_payload(Event.SESSION_TEXT, self._session_id, text="\n".join(lines))
+        )
+
+    async def _emit_slash_notice(self, name: str) -> None:
+        await self._emit(
+            event_payload(
+                Event.SESSION_NOTICE,
+                self._session_id,
+                level="info",
+                code="slash_unavailable",
+                command=name,
+                text=(
+                    f"/{name} is an interactive command and can't run in a remote "
+                    "Coding Bridge session."
+                ),
+            )
+        )
+
+    async def _emit_result_done(self, subtype: str) -> None:
+        await self._emit(
+            event_payload(
+                Event.SESSION_RESULT,
+                self._session_id,
+                subtype=subtype,
+                is_error=False,
+                result=None,
+            )
+        )
 
     async def _handle_block(self, block: Any) -> None:
         if hasattr(block, "thinking"):
@@ -231,6 +324,12 @@ def _stringify(content: Any) -> Any:
         return json.dumps(content, ensure_ascii=False)
     except (TypeError, ValueError):
         return str(content)
+
+
+def _command_from_rejection(result: str) -> str:
+    """Pull the command name out of '<cmd> isn't available in this environment.'."""
+    token = result.strip().split(" ", 1)[0]
+    return token.lstrip("/") or "command"
 
 
 _CLAUDE_EFFORT_ALIASES = {"ultra-high": "max", "ultrahigh": "max", "minimal": "low"}

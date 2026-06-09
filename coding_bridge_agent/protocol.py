@@ -67,6 +67,7 @@ class Event:
     PERMISSION_REQUEST = "permission.request"
     PERMISSION_RESOLVED = "permission.resolved"
     SESSION_RESULT = "session.result"
+    SESSION_NOTICE = "session.notice"
     SESSION_ERROR = "session.error"
     SESSION_CLOSED = "session.closed"
     SESSIONS_SNAPSHOT = "sessions.snapshot"

@@ -24,10 +24,13 @@ class Provider(Protocol):
         permission_mode: str,
         effort: str | None = None,
         images: list | None = None,
+        attachments: list | None = None,
         resume: str | None = None,
     ) -> None: ...
 
-    async def send(self, prompt: str, *, images: list | None = None) -> None: ...
+    async def send(
+        self, prompt: str, *, images: list | None = None, attachments: list | None = None
+    ) -> None: ...
 
     async def interrupt(self) -> None: ...
 

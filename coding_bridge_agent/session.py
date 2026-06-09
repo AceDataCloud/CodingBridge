@@ -62,7 +62,9 @@ class Session:
     def resolve_permission(self, request_id: str, decision: str) -> bool:
         return self._broker.resolve(request_id, "allow" if decision == "allow" else "deny")
 
-    async def start(self, prompt: str, images: list | None = None) -> None:
+    async def start(
+        self, prompt: str, images: list | None = None, attachments: list | None = None
+    ) -> None:
         await self._emit(
             event_payload(
                 Event.SESSION_STARTED,
@@ -80,12 +82,15 @@ class Session:
                 permission_mode=self.permission_mode,
                 effort=self.effort,
                 images=images,
+                attachments=attachments,
                 resume=self.resume,
             )
         )
 
-    async def send(self, prompt: str, images: list | None = None) -> None:
-        self._spawn(self._provider.send(prompt, images=images))
+    async def send(
+        self, prompt: str, images: list | None = None, attachments: list | None = None
+    ) -> None:
+        self._spawn(self._provider.send(prompt, images=images, attachments=attachments))
 
     def _spawn(self, coro: Any) -> None:
         if self._task and not self._task.done():

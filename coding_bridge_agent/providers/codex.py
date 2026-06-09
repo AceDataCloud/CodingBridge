@@ -14,6 +14,7 @@ import logging
 import shutil
 from typing import TYPE_CHECKING, Any
 
+from .. import attachments as attachment_store
 from .. import images as image_store
 from ..protocol import Event, event_payload
 
@@ -73,6 +74,7 @@ class CodexProvider:
         permission_mode: str,
         effort: str | None = None,
         images: list | None = None,
+        attachments: list | None = None,
         resume: str | None = None,
     ) -> None:
         self._cwd = cwd or self._settings.default_cwd
@@ -80,10 +82,14 @@ class CodexProvider:
         self._sandbox = _SANDBOX_BY_MODE.get(permission_mode, _DEFAULT_SANDBOX)
         self._effort = _codex_effort(effort)
         self._thread_id = resume or None
-        await self._run_turn(prompt, resume=bool(resume), images=images)
+        await self._run_turn(prompt, resume=bool(resume), images=images, attachments=attachments)
 
-    async def send(self, prompt: str, *, images: list | None = None) -> None:
-        await self._run_turn(prompt, resume=self._thread_id is not None, images=images)
+    async def send(
+        self, prompt: str, *, images: list | None = None, attachments: list | None = None
+    ) -> None:
+        await self._run_turn(
+            prompt, resume=self._thread_id is not None, images=images, attachments=attachments
+        )
 
     def _build_argv(self, prompt: str, *, resume: bool, image_paths: list[str]) -> list[str]:
         argv = ["codex", "exec"]
@@ -99,12 +105,24 @@ class CodexProvider:
         argv.append(prompt)
         return argv
 
-    async def _run_turn(self, prompt: str, *, resume: bool, images: list | None = None) -> None:
+    async def _run_turn(
+        self,
+        prompt: str,
+        *,
+        resume: bool,
+        images: list | None = None,
+        attachments: list | None = None,
+    ) -> None:
         if shutil.which("codex") is None:
             raise RuntimeError(
                 "codex CLI is not installed; install it from https://github.com/openai/codex"
             )
-        image_paths = image_store.save_images(images, self._cwd, session_id=self._session_id)
+        legacy_image_paths = image_store.save_images(images, self._cwd, session_id=self._session_id)
+        files = attachment_store.save_attachments(
+            attachments, self._cwd, session_id=self._session_id
+        )
+        image_paths = legacy_image_paths + attachment_store.image_paths(files)
+        prompt = attachment_store.attachment_note(prompt, files, legacy_image_paths)
         argv = self._build_argv(prompt, resume=resume, image_paths=image_paths)
         self._proc = await asyncio.create_subprocess_exec(
             *argv,

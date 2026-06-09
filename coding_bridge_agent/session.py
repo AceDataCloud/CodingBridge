@@ -28,6 +28,7 @@ class Session:
         provider: str = "claude",
         effort: str | None = None,
         resume: str | None = None,
+        trace_id: str | None = None,
     ) -> None:
         self.session_id = session_id
         self.status = "idle"
@@ -37,12 +38,24 @@ class Session:
         self.permission_mode = permission_mode
         self.effort = effort
         self.resume = resume
-        self._emit = emit
+        self.trace_id = trace_id
+        self._raw_emit = emit
         self._settings = settings
         self._broker = PermissionBroker()
         ask: AskPermissionFn = self._ask_permission
-        self._provider = provider_factory(provider, session_id, emit, ask)
+        self._provider = provider_factory(provider, session_id, self._emit, ask)
         self._task: asyncio.Task[None] | None = None
+
+    def set_trace(self, trace_id: str | None) -> None:
+        """Adopt the trace id carried by the latest turn (if any)."""
+        if trace_id:
+            self.trace_id = trace_id
+
+    async def _emit(self, payload: dict[str, Any]) -> None:
+        """Stamp the active trace id onto every outgoing event, then forward."""
+        if self.trace_id and "trace_id" not in payload:
+            payload = {**payload, "trace_id": self.trace_id}
+        await self._raw_emit(payload)
 
     async def _ask_permission(
         self, tool_name: str, input_data: dict[str, Any], ctx: dict[str, Any]

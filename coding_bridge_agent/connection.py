@@ -7,12 +7,13 @@ commands to local sessions. The node never accepts inbound connections.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 
 import websockets
 
-from . import capabilities, fs, history, protocol
+from . import capabilities, fs, history, logs, protocol
 from .config import Settings
 from .protocol import Action, Event, event_payload
 from .providers import KNOWN_PROVIDERS, default_provider_factory
@@ -40,6 +41,8 @@ class BridgeConnection:
         self.sessions: dict[str, Session] = {}
         self._ws: websockets.WebSocketClientProtocol | None = None
         self._stop = asyncio.Event()
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self._log_forwarder: logs.BridgeLogForwarder | None = None
 
     def capabilities(self) -> list[str]:
         # Reflect the providers whose CLI is actually installed, plus history.
@@ -69,18 +72,21 @@ class BridgeConnection:
 
     async def _connect_once(self) -> None:
         url = f"{self.settings.ws_node_url}?token={self.node_token}"
+        self._loop = asyncio.get_running_loop()
         try:
             async with websockets.connect(
                 url, max_size=None, ping_interval=20, ping_timeout=20
             ) as ws:
                 self._ws = ws
                 logger.info("connected to bridge as node %s", self.node_token[:12])
+                self._attach_log_forwarder()
                 heartbeat = asyncio.create_task(self._heartbeat())
                 try:
                     async for raw in ws:
                         await self._on_raw(raw)
                 finally:
                     heartbeat.cancel()
+                    self._detach_log_forwarder()
                     self._ws = None
         except websockets.exceptions.ConnectionClosed as exc:
             if getattr(exc, "code", None) == 4401:
@@ -115,6 +121,34 @@ class BridgeConnection:
             protocol.envelope(protocol.NODE_TO_BROWSER, payload, from_node=self.node_token)
         )
 
+    async def send_log(self, payload: dict) -> None:
+        """Forward a structured log record to the relay (which ships it to CLS)."""
+        await self._send_envelope(
+            protocol.envelope(protocol.NODE_LOG, payload, from_node=self.node_token)
+        )
+
+    def _attach_log_forwarder(self) -> None:
+        """Start streaming node logs to the relay for the life of this socket."""
+        if self._log_forwarder is not None:
+            return
+        forwarder = logs.BridgeLogForwarder(self.send_log, self._schedule)
+        logging.getLogger(logs.ROOT_LOGGER).addHandler(forwarder)
+        self._log_forwarder = forwarder
+
+    def _detach_log_forwarder(self) -> None:
+        if self._log_forwarder is None:
+            return
+        logging.getLogger(logs.ROOT_LOGGER).removeHandler(self._log_forwarder)
+        self._log_forwarder = None
+
+    def _schedule(self, coro) -> None:
+        """Run a coroutine on the daemon loop from any thread (best-effort)."""
+        loop = self._loop
+        if loop is None or loop.is_closed():
+            return
+        with contextlib.suppress(RuntimeError):
+            loop.call_soon_threadsafe(lambda: asyncio.ensure_future(coro))
+
     async def _on_raw(self, raw: str | bytes) -> None:
         try:
             message = json.loads(raw)
@@ -129,6 +163,12 @@ class BridgeConnection:
     async def _dispatch(self, payload: dict) -> None:
         action = payload.get("action")
         session_id = payload.get("session_id")
+        trace_id = payload.get("trace_id")
+        logger.info(
+            "dispatch action=%s",
+            action,
+            extra={"trace_id": trace_id, "session_id": session_id},
+        )
         try:
             if action == Action.SESSION_START:
                 await self._start_session(payload)
@@ -183,6 +223,7 @@ class BridgeConnection:
             return
         existing = self.sessions.get(session_id)
         if existing is not None:
+            existing.set_trace(payload.get("trace_id"))
             await existing.send(
                 payload.get("prompt", ""),
                 payload.get("images"),
@@ -201,6 +242,7 @@ class BridgeConnection:
             provider=provider,
             effort=payload.get("effort") or None,
             resume=payload.get("resume_session_id") or None,
+            trace_id=payload.get("trace_id"),
         )
         self.sessions[session_id] = session
         await session.start(
@@ -218,6 +260,7 @@ class BridgeConnection:
                 event_payload(Event.SESSION_ERROR, session_id, message="unknown session")
             )
             return
+        session.set_trace(payload.get("trace_id"))
         await session.send(
             payload.get("prompt", ""),
             payload.get("images"),

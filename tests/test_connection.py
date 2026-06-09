@@ -168,6 +168,49 @@ async def test_start_rejects_unsupported_provider():
     assert Event.SESSION_ERROR in _events(conn)
 
 
+async def test_trace_id_propagates_to_session_events():
+    conn = _new_conn()
+    await conn._dispatch(
+        {
+            "action": Action.SESSION_START,
+            "session_id": "s1",
+            "prompt": "hello",
+            "trace_id": "tr-abc",
+        }
+    )
+    await asyncio.sleep(0.01)
+    assert conn.sessions["s1"].trace_id == "tr-abc"
+    # Every node→browser event for this turn must echo the trace id.
+    traces = {
+        m["payload"].get("trace_id")
+        for m in conn._ws.sent
+        if m.get("type") == protocol.NODE_TO_BROWSER
+    }
+    assert traces == {"tr-abc"}
+
+
+async def test_follow_up_turn_updates_trace_id():
+    conn = _new_conn()
+    await conn._dispatch(
+        {"action": Action.SESSION_START, "session_id": "s1", "prompt": "a", "trace_id": "tr-1"}
+    )
+    await asyncio.sleep(0.01)
+    await conn._dispatch(
+        {"action": Action.SESSION_SEND, "session_id": "s1", "prompt": "b", "trace_id": "tr-2"}
+    )
+    await asyncio.sleep(0.01)
+    assert conn.sessions["s1"].trace_id == "tr-2"
+
+
+async def test_send_log_envelope_uses_node_log_type():
+    conn = _new_conn()
+    await conn.send_log({"level": "info", "msg": "hi", "trace_id": "tr-1"})
+    log_msgs = [m for m in conn._ws.sent if m.get("type") == protocol.NODE_LOG]
+    assert len(log_msgs) == 1
+    assert log_msgs[0]["from_node"] == "node_tok"
+    assert log_msgs[0]["payload"]["trace_id"] == "tr-1"
+
+
 async def test_start_accepts_codex_provider():
     conn = _new_conn()
     await conn._dispatch(

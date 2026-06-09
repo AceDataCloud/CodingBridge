@@ -41,6 +41,8 @@ class ClaudeProvider:
         self._cwd = settings.default_cwd
         self._client: Any = None
         self._connected = False
+        self._model: str | None = None
+        self._permission_mode = "default"
 
     async def start(
         self,
@@ -61,15 +63,46 @@ class ClaudeProvider:
         await self._turn(self._with_attachments(prompt, images, attachments))
 
     async def send(
-        self, prompt: str, *, images: list | None = None, attachments: list | None = None
+        self,
+        prompt: str,
+        *,
+        images: list | None = None,
+        attachments: list | None = None,
+        model: str | None = None,
+        effort: str | None = None,
+        permission_mode: str | None = None,
     ) -> None:
         if not self._connected:
             await self._ensure_client(
                 cwd=self._settings.default_cwd,
-                model=self._settings.default_model,
-                permission_mode="default",
+                model=model if model is not None else self._settings.default_model,
+                permission_mode=permission_mode or "default",
+                effort=effort,
             )
+        else:
+            await self._apply_runtime_changes(model, permission_mode)
         await self._turn(self._with_attachments(prompt, images, attachments))
+
+    async def _apply_runtime_changes(
+        self, model: str | None, permission_mode: str | None
+    ) -> None:
+        """Apply the mid-session changes the streaming SDK supports live.
+
+        Reasoning effort has no live SDK setter, so it only takes effect on the
+        next fresh session; model and permission mode switch in place.
+        """
+        if model != self._model and hasattr(self._client, "set_model"):
+            with contextlib.suppress(Exception):
+                await self._client.set_model(model or None)
+            self._model = model
+        if (
+            permission_mode
+            and permission_mode != self._permission_mode
+            and hasattr(self._client, "set_permission_mode")
+        ):
+            with contextlib.suppress(Exception):
+                await self._client.set_permission_mode(permission_mode)
+            self._permission_mode = permission_mode
 
     async def _ensure_client(
         self,
@@ -101,6 +134,8 @@ class ClaudeProvider:
         self._client = ClaudeSDKClient(options=options)
         await self._client.connect()
         self._connected = True
+        self._model = model
+        self._permission_mode = permission_mode or "default"
 
     async def _turn(self, prompt: str) -> None:
         await self._client.query(prompt)

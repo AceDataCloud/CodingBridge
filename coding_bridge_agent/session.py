@@ -10,6 +10,9 @@ from .permissions import PermissionBroker
 from .protocol import Event, event_payload
 from .providers.base import AskPermissionFn, EmitFn, ProviderFactory
 
+# Distinguishes "caller omitted this override" from "caller cleared it to default".
+_UNSET: Any = object()
+
 
 class Session:
     def __init__(
@@ -88,9 +91,33 @@ class Session:
         )
 
     async def send(
-        self, prompt: str, images: list | None = None, attachments: list | None = None
+        self,
+        prompt: str,
+        images: list | None = None,
+        attachments: list | None = None,
+        *,
+        model: Any = _UNSET,
+        effort: Any = _UNSET,
+        permission_mode: Any = _UNSET,
     ) -> None:
-        self._spawn(self._provider.send(prompt, images=images, attachments=attachments))
+        # A follow-up turn may carry new settings; remember them so info()/snapshots
+        # and later turns reflect the change.
+        if model is not _UNSET:
+            self.model = model or None
+        if effort is not _UNSET:
+            self.effort = effort or None
+        if permission_mode is not _UNSET and permission_mode:
+            self.permission_mode = permission_mode
+        self._spawn(
+            self._provider.send(
+                prompt,
+                images=images,
+                attachments=attachments,
+                model=self.model,
+                effort=self.effort,
+                permission_mode=self.permission_mode,
+            )
+        )
 
     def _spawn(self, coro: Any) -> None:
         if self._task and not self._task.done():

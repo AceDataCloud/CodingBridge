@@ -20,6 +20,9 @@ class FakeProvider:
         self.effort = None
         self.images = None
         self.attachments = None
+        self.sent_model = None
+        self.sent_effort = None
+        self.sent_permission_mode = None
         self.closed = False
 
     async def start(
@@ -40,10 +43,22 @@ class FakeProvider:
         self.images = images
         self.attachments = attachments
 
-    async def send(self, prompt, *, images=None, attachments=None):
+    async def send(
+        self,
+        prompt,
+        *,
+        images=None,
+        attachments=None,
+        model=None,
+        effort=None,
+        permission_mode=None,
+    ):
         self.prompts.append(prompt)
         self.images = images
         self.attachments = attachments
+        self.sent_model = model
+        self.sent_effort = effort
+        self.sent_permission_mode = permission_mode
 
     async def interrupt(self):
         pass
@@ -168,6 +183,46 @@ async def test_start_accepts_codex_provider():
     assert "s1" in conn.sessions
     assert conn.sessions["s1"].provider == "codex"
     assert conn.sessions["s1"]._provider.effort == "high"
+
+
+async def test_send_forwards_model_override_to_provider():
+    conn = _new_conn()
+    await conn._dispatch({"action": Action.SESSION_START, "session_id": "s1", "prompt": "hi"})
+    await asyncio.sleep(0.01)
+    await conn._dispatch(
+        {
+            "action": Action.SESSION_SEND,
+            "session_id": "s1",
+            "prompt": "switch",
+            "model": "opus",
+            "effort": "high",
+            "permission_mode": "plan",
+        }
+    )
+    await asyncio.sleep(0.01)
+    provider = conn.sessions["s1"]._provider
+    assert provider.sent_model == "opus"
+    assert provider.sent_effort == "high"
+    assert provider.sent_permission_mode == "plan"
+    # The session remembers the new settings for later turns and snapshots.
+    assert conn.sessions["s1"].model == "opus"
+    assert conn.sessions["s1"].effort == "high"
+    assert conn.sessions["s1"].permission_mode == "plan"
+
+
+async def test_send_without_overrides_keeps_session_model():
+    conn = _new_conn()
+    await conn._dispatch(
+        {"action": Action.SESSION_START, "session_id": "s1", "prompt": "hi", "model": "sonnet"}
+    )
+    await asyncio.sleep(0.01)
+    await conn._dispatch({"action": Action.SESSION_SEND, "session_id": "s1", "prompt": "more"})
+    await asyncio.sleep(0.01)
+    # No model in the follow-up payload → the session keeps its current model and
+    # still forwards it to the provider for the next turn.
+    assert conn.sessions["s1"].model == "sonnet"
+    assert conn.sessions["s1"]._provider.sent_model == "sonnet"
+
 
 
 async def test_sessions_list_snapshot():

@@ -133,12 +133,7 @@ class BridgeConnection:
             if action == Action.SESSION_START:
                 await self._start_session(payload)
             elif action == Action.SESSION_SEND:
-                await self._send_to_session(
-                    session_id,
-                    payload.get("prompt", ""),
-                    payload.get("images"),
-                    payload.get("attachments"),
-                )
+                await self._send_to_session(session_id, payload)
             elif action == Action.SESSION_INTERRUPT:
                 await self._interrupt_session(session_id)
             elif action == Action.SESSION_CLOSE:
@@ -189,7 +184,10 @@ class BridgeConnection:
         existing = self.sessions.get(session_id)
         if existing is not None:
             await existing.send(
-                payload.get("prompt", ""), payload.get("images"), payload.get("attachments")
+                payload.get("prompt", ""),
+                payload.get("images"),
+                payload.get("attachments"),
+                **_session_overrides(payload),
             )
             return
         session = Session(
@@ -212,9 +210,7 @@ class BridgeConnection:
     async def _send_to_session(
         self,
         session_id: str | None,
-        prompt: str,
-        images: list | None = None,
-        attachments: list | None = None,
+        payload: dict,
     ) -> None:
         session = self.sessions.get(session_id) if session_id else None
         if session is None:
@@ -222,7 +218,12 @@ class BridgeConnection:
                 event_payload(Event.SESSION_ERROR, session_id, message="unknown session")
             )
             return
-        await session.send(prompt, images, attachments)
+        await session.send(
+            payload.get("prompt", ""),
+            payload.get("images"),
+            payload.get("attachments"),
+            **_session_overrides(payload),
+        )
 
     async def _interrupt_session(self, session_id: str | None) -> None:
         session = self.sessions.get(session_id) if session_id else None
@@ -284,6 +285,11 @@ class BridgeConnection:
         for session in list(self.sessions.values()):
             await session.close()
         self.sessions.clear()
+
+
+def _session_overrides(payload: dict) -> dict:
+    """Live-changeable settings a follow-up turn may carry; only pass keys present."""
+    return {key: payload[key] for key in ("model", "effort", "permission_mode") if key in payload}
 
 
 def _is_auth_error(exc: Exception) -> bool:

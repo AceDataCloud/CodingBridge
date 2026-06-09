@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, Any
 from .. import attachments as attachment_store
 from .. import images as image_store
 from ..protocol import Event, event_payload
+from .base import slash_name
 
 if TYPE_CHECKING:
     from ..config import Settings
@@ -82,6 +83,8 @@ class CodexProvider:
         self._sandbox = _SANDBOX_BY_MODE.get(permission_mode, _DEFAULT_SANDBOX)
         self._effort = _codex_effort(effort)
         self._thread_id = resume or None
+        if await self._maybe_handle_slash(prompt):
+            return
         await self._run_turn(prompt, resume=bool(resume), images=images, attachments=attachments)
 
     async def send(
@@ -94,6 +97,8 @@ class CodexProvider:
         effort: str | None = None,
         permission_mode: str | None = None,
     ) -> None:
+        if await self._maybe_handle_slash(prompt):
+            return
         # exec spawns a fresh process per turn, so a new model/effort/sandbox
         # simply applies to the next resumed turn.
         self._model = model
@@ -103,6 +108,39 @@ class CodexProvider:
         await self._run_turn(
             prompt, resume=self._thread_id is not None, images=images, attachments=attachments
         )
+
+    async def _maybe_handle_slash(self, prompt: str) -> bool:
+        """Codex `exec` has no slash processor, so report commands as unavailable.
+
+        Returns True when a slash command was intercepted with a localized
+        notice so the caller skips spawning ``codex exec``.
+        """
+        name = slash_name(prompt)
+        if name is None:
+            return False
+        await self._emit(
+            event_payload(
+                Event.SESSION_NOTICE,
+                self._session_id,
+                level="info",
+                code="slash_codex_unsupported",
+                command=name,
+                text=(
+                    f"/{name} is a Codex interactive command and isn't available "
+                    "in a remote Coding Bridge session."
+                ),
+            )
+        )
+        await self._emit(
+            event_payload(
+                Event.SESSION_RESULT,
+                self._session_id,
+                subtype="notice",
+                is_error=False,
+                usage=None,
+            )
+        )
+        return True
 
     def _build_argv(self, prompt: str, *, resume: bool, image_paths: list[str]) -> list[str]:
         argv = ["codex", "exec"]

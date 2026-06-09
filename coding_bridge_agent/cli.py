@@ -7,7 +7,7 @@ import logging
 import sys
 from pathlib import Path
 
-from . import store
+from . import logs, store
 from .config import Settings
 from .connection import BridgeConnection
 from .pairing import PairingError, poll_for_token, start_pairing
@@ -21,12 +21,19 @@ def _build_settings(args: argparse.Namespace) -> Settings:
         settings.node_name = args.name
     if getattr(args, "config_dir", None):
         settings.config_dir = Path(args.config_dir).expanduser()
+        settings.log_dir = settings.config_dir / "logs"
     if getattr(args, "model", None):
         settings.default_model = args.model
     if getattr(args, "cwd", None):
         settings.default_cwd = args.cwd
     if getattr(args, "permission_timeout", None) is not None:
         settings.permission_timeout = args.permission_timeout
+    if getattr(args, "log_dir", None):
+        settings.log_dir = Path(args.log_dir).expanduser()
+    if getattr(args, "log_level", None):
+        settings.log_level = args.log_level
+    if getattr(args, "verbose", False):
+        settings.log_level = "DEBUG"
     return settings
 
 
@@ -146,6 +153,25 @@ def main(argv: list[str] | None = None) -> None:
     common.add_argument(
         "--config-dir", default=argparse.SUPPRESS, help="Where credentials are stored"
     )
+    common.add_argument(
+        "-v",
+        "--verbose",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="Enable debug logging",
+    )
+    common.add_argument(
+        "--log-level",
+        dest="log_level",
+        default=argparse.SUPPRESS,
+        help="Log level (DEBUG, INFO, WARNING, ERROR)",
+    )
+    common.add_argument(
+        "--log-dir",
+        dest="log_dir",
+        default=argparse.SUPPRESS,
+        help="Directory for rotating log files",
+    )
 
     parser = argparse.ArgumentParser(
         prog="coding-bridge-agent",
@@ -176,9 +202,10 @@ def main(argv: list[str] | None = None) -> None:
     )
 
     args = parser.parse_args(argv)
-    logging.basicConfig(
-        level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s"
-    )
+    settings = _build_settings(args)
+    log_path = logs.setup(settings.log_level, settings.log_dir)
+    if log_path is not None:
+        logging.getLogger(logs.ROOT_LOGGER).debug("logging to %s", log_path)
     try:
         args.func(args)
     except KeyboardInterrupt:

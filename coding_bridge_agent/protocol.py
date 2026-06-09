@@ -23,6 +23,9 @@ ERROR = "error"
 NODE_REGISTERED = "node.registered"
 NODE_HEARTBEAT = "node.heartbeat"
 NODE_HEARTBEAT_ACK = "node.heartbeat_ack"
+# Node-originated structured log line. The node holds no CLS credentials, so the
+# relay is its log sink: it ships these to Tencent CLS for end-to-end tracing.
+NODE_LOG = "node.log"
 
 
 def envelope(
@@ -79,10 +82,22 @@ class Event:
     PONG = "pong"
 
 
-def event_payload(event: str, session_id: str | None = None, **fields: Any) -> dict[str, Any]:
-    """Build an inner event payload for node → browser traffic."""
+def event_payload(
+    event: str,
+    session_id: str | None = None,
+    *,
+    trace_id: str | None = None,
+    **fields: Any,
+) -> dict[str, Any]:
+    """Build an inner event payload for node → browser traffic.
+
+    ``trace_id`` (when present) is echoed back so the browser can correlate this
+    reply with the turn that produced it, and so CLS rows line up end to end.
+    """
     payload: dict[str, Any] = {"event": event}
     if session_id is not None:
         payload["session_id"] = session_id
+    if trace_id is not None:
+        payload["trace_id"] = trace_id
     payload.update(fields)
     return payload

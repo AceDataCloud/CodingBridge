@@ -32,6 +32,8 @@ class Settings:
     default_cwd: str = ""
     default_model: str | None = None
     claim_url_template: str = DEFAULT_CLAIM_URL
+    log_level: str = "INFO"
+    log_dir: Path | None = None
 
     def __post_init__(self) -> None:
         if not self.node_name:
@@ -39,6 +41,10 @@ class Settings:
         if not self.default_cwd:
             self.default_cwd = os.getcwd()
         self.config_dir = Path(self.config_dir).expanduser()
+        if self.log_dir is None:
+            self.log_dir = self.config_dir / "logs"
+        else:
+            self.log_dir = Path(self.log_dir).expanduser()
 
     @property
     def _base(self) -> str:
@@ -79,4 +85,10 @@ class Settings:
             permission_timeout=_f("CODING_BRIDGE_PERMISSION_TIMEOUT", 300.0),
             default_model=os.environ.get("CODING_BRIDGE_MODEL") or None,
             claim_url_template=os.environ.get("CODING_BRIDGE_CLAIM_URL", DEFAULT_CLAIM_URL),
+            log_level=os.environ.get("CODING_BRIDGE_LOG_LEVEL", "INFO"),
+            log_dir=(
+                Path(os.environ["CODING_BRIDGE_LOG_DIR"])
+                if os.environ.get("CODING_BRIDGE_LOG_DIR")
+                else None
+            ),
         )

@@ -61,6 +61,7 @@ class Event:
 
     SESSION_STARTED = "session.started"
     SESSION_TEXT = "session.text"
+    SESSION_TEXT_DELTA = "session.text_delta"
     SESSION_THINKING = "session.thinking"
     SESSION_TOOL_USE = "session.tool_use"
     SESSION_TOOL_RESULT = "session.tool_result"

@@ -19,19 +19,31 @@ class FakeProvider:
         self.resume = None
         self.effort = None
         self.images = None
+        self.attachments = None
         self.closed = False
 
     async def start(
-        self, prompt, *, cwd, model, permission_mode, effort=None, images=None, resume=None
+        self,
+        prompt,
+        *,
+        cwd,
+        model,
+        permission_mode,
+        effort=None,
+        images=None,
+        attachments=None,
+        resume=None,
     ):
         self.prompts.append(prompt)
         self.resume = resume
         self.effort = effort
         self.images = images
+        self.attachments = attachments
 
-    async def send(self, prompt, *, images=None):
+    async def send(self, prompt, *, images=None, attachments=None):
         self.prompts.append(prompt)
         self.images = images
+        self.attachments = attachments
 
     async def interrupt(self):
         pass
@@ -182,6 +194,27 @@ async def test_start_forwards_images_to_provider():
     )
     await asyncio.sleep(0.01)
     assert conn.sessions["s1"]._provider.images == ["data:image/png;base64,iVBORw0KGgo="]
+
+
+async def test_start_forwards_attachments_to_provider():
+    conn = _new_conn()
+    attachments = [
+        {
+            "type": "file",
+            "url": "https://cdn.acedata.cloud/report.pdf",
+            "name": "report.pdf",
+        }
+    ]
+    await conn._dispatch(
+        {
+            "action": Action.SESSION_START,
+            "session_id": "s1",
+            "prompt": "read",
+            "attachments": attachments,
+        }
+    )
+    await asyncio.sleep(0.01)
+    assert conn.sessions["s1"]._provider.attachments == attachments
 
 
 async def test_fs_list_returns_snapshot(tmp_path):

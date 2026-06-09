@@ -134,7 +134,10 @@ class BridgeConnection:
                 await self._start_session(payload)
             elif action == Action.SESSION_SEND:
                 await self._send_to_session(
-                    session_id, payload.get("prompt", ""), payload.get("images")
+                    session_id,
+                    payload.get("prompt", ""),
+                    payload.get("images"),
+                    payload.get("attachments"),
                 )
             elif action == Action.SESSION_INTERRUPT:
                 await self._interrupt_session(session_id)
@@ -185,7 +188,9 @@ class BridgeConnection:
             return
         existing = self.sessions.get(session_id)
         if existing is not None:
-            await existing.send(payload.get("prompt", ""), payload.get("images"))
+            await existing.send(
+                payload.get("prompt", ""), payload.get("images"), payload.get("attachments")
+            )
             return
         session = Session(
             session_id,
@@ -200,10 +205,16 @@ class BridgeConnection:
             resume=payload.get("resume_session_id") or None,
         )
         self.sessions[session_id] = session
-        await session.start(payload.get("prompt", ""), payload.get("images"))
+        await session.start(
+            payload.get("prompt", ""), payload.get("images"), payload.get("attachments")
+        )
 
     async def _send_to_session(
-        self, session_id: str | None, prompt: str, images: list | None = None
+        self,
+        session_id: str | None,
+        prompt: str,
+        images: list | None = None,
+        attachments: list | None = None,
     ) -> None:
         session = self.sessions.get(session_id) if session_id else None
         if session is None:
@@ -211,7 +222,7 @@ class BridgeConnection:
                 event_payload(Event.SESSION_ERROR, session_id, message="unknown session")
             )
             return
-        await session.send(prompt, images)
+        await session.send(prompt, images, attachments)
 
     async def _interrupt_session(self, session_id: str | None) -> None:
         session = self.sessions.get(session_id) if session_id else None

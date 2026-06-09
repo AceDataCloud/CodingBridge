@@ -85,8 +85,21 @@ class CodexProvider:
         await self._run_turn(prompt, resume=bool(resume), images=images, attachments=attachments)
 
     async def send(
-        self, prompt: str, *, images: list | None = None, attachments: list | None = None
+        self,
+        prompt: str,
+        *,
+        images: list | None = None,
+        attachments: list | None = None,
+        model: str | None = None,
+        effort: str | None = None,
+        permission_mode: str | None = None,
     ) -> None:
+        # exec spawns a fresh process per turn, so a new model/effort/sandbox
+        # simply applies to the next resumed turn.
+        self._model = model
+        self._effort = _codex_effort(effort)
+        if permission_mode:
+            self._sandbox = _SANDBOX_BY_MODE.get(permission_mode, _DEFAULT_SANDBOX)
         await self._run_turn(
             prompt, resume=self._thread_id is not None, images=images, attachments=attachments
         )

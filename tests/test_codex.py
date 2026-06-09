@@ -146,6 +146,23 @@ def test_build_argv_resume_uses_thread_id():
     assert argv[-1] == "more"
 
 
+async def test_send_applies_model_effort_and_sandbox_overrides():
+    provider, _ = _provider()
+    provider._thread_id = "t1"
+    captured: dict = {}
+
+    async def fake_run_turn(prompt, *, resume, images=None, attachments=None):
+        captured["resume"] = resume
+
+    provider._run_turn = fake_run_turn  # type: ignore[method-assign]
+    await provider.send("go", model="gpt-5", effort="high", permission_mode="plan")
+    assert provider._model == "gpt-5"
+    assert provider._effort == "high"
+    assert provider._sandbox == "read-only"
+    assert captured["resume"] is True
+
+
+
 def test_build_argv_includes_image_args():
     provider, _ = _provider()
     provider._sandbox = "workspace-write"

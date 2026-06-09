@@ -29,7 +29,14 @@ class Provider(Protocol):
     ) -> None: ...
 
     async def send(
-        self, prompt: str, *, images: list | None = None, attachments: list | None = None
+        self,
+        prompt: str,
+        *,
+        images: list | None = None,
+        attachments: list | None = None,
+        model: str | None = None,
+        effort: str | None = None,
+        permission_mode: str | None = None,
     ) -> None: ...
 
     async def interrupt(self) -> None: ...

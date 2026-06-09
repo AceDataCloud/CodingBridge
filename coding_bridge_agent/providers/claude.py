@@ -50,6 +50,11 @@ class ClaudeProvider:
         self._connected = False
         self._server_info: dict[str, Any] | None = None
         self._known_commands: set[str] = set()
+        # Per-turn partial-message (token) streaming state.
+        self._turn_seq = 0
+        self._stream_text_ord = 0
+        self._open_text: dict[Any, dict[str, Any]] = {}
+        self._saw_text_stream = False
 
     async def start(
         self,
@@ -143,6 +148,9 @@ class ClaudeProvider:
             setting_sources=["user", "project", "local"],
             resume=resume or None,
         )
+        # Stream assistant text token-by-token when the SDK supports it.
+        if hasattr(options, "include_partial_messages"):
+            options.include_partial_messages = True
         _apply_effort(options, effort)
         self._client = ClaudeSDKClient(options=options)
         await self._client.connect()
@@ -179,9 +187,11 @@ class ClaudeProvider:
         return True
 
     async def _turn(self, prompt: str) -> None:
+        self._begin_stream_turn()
         await self._client.query(prompt)
         async for message in self._client.receive_response():
             await self._handle_message(message)
+        await self._flush_open_text()
 
     def _with_attachments(
         self, prompt: str, images: list | None, attachments: list | None
@@ -193,6 +203,10 @@ class ClaudeProvider:
         return attachment_store.attachment_note(prompt, files, image_paths)
 
     async def _handle_message(self, message: Any) -> None:
+        stream_event = getattr(message, "event", None)
+        if isinstance(stream_event, dict):
+            await self._handle_stream_event(stream_event)
+            return
         content = getattr(message, "content", None)
         if isinstance(content, list):
             for block in content:
@@ -200,6 +214,7 @@ class ClaudeProvider:
             return
         # ResultMessage marks the end of a turn.
         if hasattr(message, "subtype") and hasattr(message, "is_error"):
+            await self._flush_open_text()
             result = getattr(message, "result", None)
             # Safety net: an unknown TUI-only command slipped past the catalog
             # check. Swap the cryptic CLI string for a localized notice.
@@ -263,12 +278,72 @@ class ClaudeProvider:
             )
         )
 
+    def _begin_stream_turn(self) -> None:
+        """Reset per-turn streaming state before a new query."""
+        self._turn_seq += 1
+        self._stream_text_ord = 0
+        self._open_text = {}
+        self._saw_text_stream = False
+
+    async def _flush_open_text(self) -> None:
+        """Commit any streamed text block that never saw a stop event."""
+        if not self._open_text:
+            return
+        for blk in list(self._open_text.values()):
+            await self._emit(
+                event_payload(
+                    Event.SESSION_TEXT, self._session_id, text=blk["text"], id=blk["id"]
+                )
+            )
+        self._open_text = {}
+
+    async def _handle_stream_event(self, raw: dict[str, Any]) -> None:
+        """Relay Anthropic partial-message events as incremental text deltas.
+
+        Only assistant text streams token-by-token; thinking and tool blocks are
+        still emitted whole from the assembled AssistantMessage.
+        """
+        etype = raw.get("type")
+        if etype == "content_block_start":
+            block = raw.get("content_block") or {}
+            if block.get("type") == "text":
+                stream_id = f"{self._session_id}:{self._turn_seq}:{self._stream_text_ord}"
+                self._stream_text_ord += 1
+                self._open_text[raw.get("index")] = {"id": stream_id, "text": ""}
+        elif etype == "content_block_delta":
+            delta = raw.get("delta") or {}
+            if delta.get("type") == "text_delta":
+                blk = self._open_text.get(raw.get("index"))
+                if blk is not None:
+                    chunk = delta.get("text") or ""
+                    blk["text"] += chunk
+                    self._saw_text_stream = True
+                    await self._emit(
+                        event_payload(
+                            Event.SESSION_TEXT_DELTA,
+                            self._session_id,
+                            text=chunk,
+                            id=blk["id"],
+                        )
+                    )
+        elif etype == "content_block_stop":
+            blk = self._open_text.pop(raw.get("index"), None)
+            if blk is not None:
+                await self._emit(
+                    event_payload(
+                        Event.SESSION_TEXT, self._session_id, text=blk["text"], id=blk["id"]
+                    )
+                )
+
     async def _handle_block(self, block: Any) -> None:
         if hasattr(block, "thinking"):
             await self._emit(
                 event_payload(Event.SESSION_THINKING, self._session_id, text=block.thinking)
             )
         elif hasattr(block, "text"):
+            # Already streamed + committed via stream events this turn.
+            if self._saw_text_stream:
+                return
             await self._emit(event_payload(Event.SESSION_TEXT, self._session_id, text=block.text))
         elif hasattr(block, "name") and hasattr(block, "input"):
             await self._emit(

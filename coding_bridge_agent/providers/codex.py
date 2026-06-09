@@ -11,7 +11,9 @@ import asyncio
 import contextlib
 import json
 import logging
+import math
 import shutil
+import uuid
 from typing import TYPE_CHECKING, Any
 
 from .. import attachments as attachment_store
@@ -35,6 +37,13 @@ _SANDBOX_BY_MODE = {
 _DEFAULT_SANDBOX = "workspace-write"
 _EFFORT_ALIASES = {"max": "high", "ultra-high": "high", "ultrahigh": "high"}
 _EFFORT_VALUES = {"minimal", "low", "medium", "high"}
+
+# Typewriter cadence for codex agent messages. ``codex exec`` delivers the final
+# message whole, so we replay it as text deltas for visual streaming parity with
+# Claude. Tests patch STREAM_DELAY to 0 for determinism.
+STREAM_CHUNK_TARGET = 80
+STREAM_MIN_CHUNK = 3
+STREAM_DELAY = 0.012
 
 
 def _codex_effort(effort: str | None) -> str | None:
@@ -261,7 +270,7 @@ class CodexProvider:
         if itype == "agent_message":
             text = item.get("text")
             if completed and text:
-                await self._emit(event_payload(Event.SESSION_TEXT, self._session_id, text=text))
+                await self._emit_text_stream(text)
         elif itype == "reasoning":
             text = item.get("text")
             if completed and text:
@@ -310,7 +319,29 @@ class CodexProvider:
                     )
                 )
         elif completed and item.get("text"):
-            await self._emit(event_payload(Event.SESSION_TEXT, self._session_id, text=item["text"]))
+            await self._emit_text_stream(item["text"])
+
+    async def _emit_text_stream(self, text: str) -> None:
+        """Replay a whole agent message as incremental text deltas + a commit.
+
+        ``codex exec`` has no native token streaming, so we chunk the final
+        message into deltas (capped chunk count) to mirror Claude's streaming
+        UX, then emit an authoritative ``session.text`` carrying the same id.
+        """
+        stream_id = f"{self._session_id}:{uuid.uuid4().hex[:8]}"
+        size = max(STREAM_MIN_CHUNK, math.ceil(len(text) / STREAM_CHUNK_TARGET))
+        for start in range(0, len(text), size):
+            chunk = text[start : start + size]
+            await self._emit(
+                event_payload(
+                    Event.SESSION_TEXT_DELTA, self._session_id, text=chunk, id=stream_id
+                )
+            )
+            if STREAM_DELAY:
+                await asyncio.sleep(STREAM_DELAY)
+        await self._emit(
+            event_payload(Event.SESSION_TEXT, self._session_id, text=text, id=stream_id)
+        )
 
     async def interrupt(self) -> None:
         proc = self._proc

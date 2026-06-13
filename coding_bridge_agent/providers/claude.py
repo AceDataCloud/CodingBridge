@@ -55,6 +55,14 @@ class ClaudeProvider:
         self._stream_text_ord = 0
         self._open_text: dict[Any, dict[str, Any]] = {}
         self._saw_text_stream = False
+        # Resume-replay guard (first resumed turn only); see _gated_receive.
+        self._gate_active = False
+        self._gate_uuids: set[str] = set()
+        self._gate_msg_ids: set[str] = set()
+        self._gate_stream_replay = False
+        self._gate_saw_replay = False
+        self._gate_saw_genuine = False
+        self._gate_swallowed_result = False
 
     async def start(
         self,
@@ -71,12 +79,26 @@ class ClaudeProvider:
         self._cwd = cwd or self._settings.default_cwd
         self._model = model
         self._permission_mode = permission_mode or "default"
+        self._arm_resume_guard(resume)
         await self._ensure_client(
             cwd=cwd, model=model, permission_mode=permission_mode, effort=effort, resume=resume
         )
         if await self._maybe_handle_slash(prompt):
             return
         await self._turn(self._with_attachments(prompt, images, attachments))
+
+    def _arm_resume_guard(self, resume: str | None) -> None:
+        """Load the resumed transcript's ids so the first turn can drop a replay."""
+        self._gate_active = False
+        self._gate_uuids = set()
+        self._gate_msg_ids = set()
+        if not resume:
+            return
+        from .. import history
+
+        with contextlib.suppress(Exception):
+            self._gate_uuids, self._gate_msg_ids = history.claude_known_ids(resume)
+        self._gate_active = bool(self._gate_uuids or self._gate_msg_ids)
 
     async def send(
         self,
@@ -189,9 +211,84 @@ class ClaudeProvider:
     async def _turn(self, prompt: str) -> None:
         self._begin_stream_turn()
         await self._client.query(prompt)
-        async for message in self._client.receive_response():
-            await self._handle_message(message)
+        if self._gate_active:
+            await self._gated_receive()
+        else:
+            async for message in self._client.receive_response():
+                await self._handle_message(message)
         await self._flush_open_text()
+
+    async def _gated_receive(self) -> None:
+        """First resumed turn: drop any transcript the CLI replays verbatim.
+
+        Some claude CLI versions re-stream the whole resumed conversation (ending
+        in its own result) before processing the new turn. Those replayed messages
+        reuse the transcript's original ids, so we drop them — and swallow the
+        replay's result instead of letting it end the turn — and forward only the
+        genuinely new output. A no-op on CLIs that don't replay (no id matches).
+        """
+        self._gate_stream_replay = False
+        self._gate_saw_replay = False
+        self._gate_saw_genuine = False
+        self._gate_swallowed_result = False
+        try:
+            async for message in self._client.receive_messages():
+                if await self._gated_handle(message):
+                    break
+        finally:
+            self._gate_active = False
+
+    async def _gated_handle(self, message: Any) -> bool:
+        """Filter one message during the resumed first turn; True ends the turn."""
+        stream_event = getattr(message, "event", None)
+        if isinstance(stream_event, dict):
+            if stream_event.get("type") == "message_start":
+                msg = stream_event.get("message") or {}
+                mid = msg.get("id")
+                self._gate_stream_replay = bool(mid and mid in self._gate_msg_ids)
+                self._gate_saw_replay = self._gate_saw_replay or self._gate_stream_replay
+                return False
+            if self._gate_stream_replay:
+                return False  # drop deltas/stop of a replayed streaming message
+            self._gate_saw_genuine = True
+            await self._handle_stream_event(stream_event)
+            return False
+        content = getattr(message, "content", None)
+        if isinstance(content, list):
+            uid = getattr(message, "uuid", None)
+            if uid and uid in self._gate_uuids:
+                self._gate_saw_replay = True
+                return False  # drop a replayed complete message
+            self._gate_saw_genuine = True
+            for block in content:
+                await self._handle_block(block)
+            return False
+        # ResultMessage: swallow the replay's terminating result once, so the
+        # genuine turn that follows it still streams; otherwise end the turn.
+        if hasattr(message, "subtype") and hasattr(message, "is_error"):
+            replay_result = (
+                self._gate_saw_replay
+                and not self._gate_saw_genuine
+                and not self._gate_swallowed_result
+            )
+            if replay_result:
+                self._gate_swallowed_result = True
+                return False
+            await self._handle_message(message)
+            return True
+        self._note_system(message)
+        return False
+
+    def _note_system(self, message: Any) -> None:
+        """Log the resumed node's CLI version (rides node.log → CLS) once."""
+        if getattr(message, "subtype", None) != "init":
+            return
+        data = getattr(message, "data", None)
+        version = data.get("claude_code_version") if isinstance(data, dict) else None
+        if version:
+            logger.info(
+                "claude resume init version=%s session=%s", version, self._session_id
+            )
 
     def _with_attachments(
         self, prompt: str, images: list | None, attachments: list | None

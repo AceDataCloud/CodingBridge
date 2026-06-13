@@ -56,6 +56,19 @@ class Provider(Protocol):
         permission_mode: str | None = None,
     ) -> None: ...
 
+    async def edit(
+        self,
+        prompt: str,
+        *,
+        cut_uuid: str | None,
+        model: str | None = None,
+        permission_mode: str | None = None,
+        effort: str | None = None,
+        images: list | None = None,
+        attachments: list | None = None,
+        restore_code: bool = False,
+    ) -> None: ...
+
     async def interrupt(self) -> None: ...
 
     async def aclose(self) -> None: ...

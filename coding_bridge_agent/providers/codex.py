@@ -118,6 +118,44 @@ class CodexProvider:
             prompt, resume=self._thread_id is not None, images=images, attachments=attachments
         )
 
+    async def edit(
+        self,
+        prompt: str,
+        *,
+        cut_uuid: str | None,
+        model: str | None = None,
+        permission_mode: str | None = None,
+        effort: str | None = None,
+        images: list | None = None,
+        attachments: list | None = None,
+        restore_code: bool = False,
+    ) -> None:
+        """Editing is unsupported for Codex.
+
+        ``codex exec resume`` only continues a thread — there is no truncate or
+        fork primitive — so a past prompt can't be rewritten without rewriting
+        Codex's internal rollout file. Capabilities advertise this off, so this
+        is only a defensive guard; report it cleanly instead of forking blindly.
+        """
+        await self._emit(
+            event_payload(
+                Event.SESSION_NOTICE,
+                self._session_id,
+                level="info",
+                code="edit_unsupported",
+                text="Editing a past prompt isn't supported for Codex sessions.",
+            )
+        )
+        await self._emit(
+            event_payload(
+                Event.SESSION_RESULT,
+                self._session_id,
+                subtype="notice",
+                is_error=False,
+                usage=None,
+            )
+        )
+
     async def _maybe_handle_slash(self, prompt: str) -> bool:
         """Codex `exec` has no slash processor, so report commands as unavailable.
 

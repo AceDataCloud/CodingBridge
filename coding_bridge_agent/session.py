@@ -172,6 +172,39 @@ class Session:
             )
         )
 
+    async def edit(
+        self,
+        prompt: str,
+        *,
+        cut_uuid: str | None,
+        images: list | None = None,
+        attachments: list | None = None,
+        model: Any = _UNSET,
+        effort: Any = _UNSET,
+        permission_mode: Any = _UNSET,
+        restore_code: bool = False,
+    ) -> None:
+        # Edit re-runs the turn from a fork point; remember any new settings the
+        # same way send() does so info()/snapshots and later turns reflect them.
+        if model is not _UNSET:
+            self.model = model or None
+        if effort is not _UNSET:
+            self.effort = effort or None
+        if permission_mode is not _UNSET and permission_mode:
+            self.permission_mode = permission_mode
+        self._spawn(
+            lambda: self._provider.edit(
+                prompt,
+                cut_uuid=cut_uuid,
+                model=self.model,
+                permission_mode=self.permission_mode,
+                effort=self.effort,
+                images=images,
+                attachments=attachments,
+                restore_code=restore_code,
+            )
+        )
+
     def _spawn(self, make_turn: _TurnFactory) -> None:
         if self._task and not self._task.done():
             # A turn is already running; chain after it so inputs stay ordered.

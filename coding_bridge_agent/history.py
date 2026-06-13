@@ -43,6 +43,32 @@ def list_sessions(limit: int = 200) -> list[dict[str, Any]]:
     return sessions[:limit]
 
 
+def claude_known_ids(session_id: str) -> tuple[set[str], set[str]]:
+    """Return ``(line_uuids, message_ids)`` already recorded in a claude transcript.
+
+    Some claude CLI versions re-stream the whole resumed conversation before the
+    new turn when launched with ``--resume``. Those replayed messages carry the
+    transcript's original ids verbatim — the per-line ``uuid`` and the assistant
+    ``message.id`` (``msg_…``). The resume turn matches against these sets to drop
+    the replay and forward only genuinely new output. Empty when no transcript.
+    """
+    line_uuids: set[str] = set()
+    msg_ids: set[str] = set()
+    path = _claude_path(session_id)
+    if path is None:
+        return line_uuids, msg_ids
+    for rec in _iter_jsonl(path):
+        if rec.get("type") not in ("user", "assistant"):
+            continue
+        uid = rec.get("uuid")
+        if isinstance(uid, str):
+            line_uuids.add(uid)
+        msg = rec.get("message")
+        if isinstance(msg, dict) and isinstance(msg.get("id"), str):
+            msg_ids.add(msg["id"])
+    return line_uuids, msg_ids
+
+
 def read_session(provider: str, session_id: str) -> dict[str, Any]:
     """Return a normalised transcript ``{provider,title,cwd,model,...,events}``."""
     if provider == "claude":

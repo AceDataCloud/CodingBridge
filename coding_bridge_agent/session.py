@@ -101,22 +101,28 @@ class Session:
         self, tool_name: str, input_data: dict[str, Any], ctx: dict[str, Any]
     ) -> str:
         request_id = uuid.uuid4().hex
-        await self._emit(
-            event_payload(
-                Event.PERMISSION_REQUEST,
-                self.session_id,
-                request_id=request_id,
-                tool=tool_name,
-                input=input_data,
-                title=ctx.get("title"),
-                display_name=ctx.get("display_name"),
-                description=ctx.get("description"),
-            )
+        # The descriptor the browser renders. Kept by the broker for the life of
+        # the prompt so a reconnecting browser can rebuild it from a snapshot.
+        detail = {
+            "request_id": request_id,
+            "session_id": self.session_id,
+            "tool": tool_name,
+            "input": input_data,
+            "title": ctx.get("title"),
+            "display_name": ctx.get("display_name"),
+            "description": ctx.get("description"),
+        }
+        await self._emit(event_payload(Event.PERMISSION_REQUEST, **detail))
+        return await self._broker.request(
+            request_id, self._settings.permission_timeout, detail=detail
         )
-        return await self._broker.request(request_id, self._settings.permission_timeout)
 
     def resolve_permission(self, request_id: str, decision: str) -> bool:
         return self._broker.resolve(request_id, "allow" if decision == "allow" else "deny")
+
+    def pending_permissions(self) -> list[dict[str, Any]]:
+        """Descriptors of this session's still-unresolved permission requests."""
+        return self._broker.pending_details()
 
     async def start(
         self, prompt: str, images: list | None = None, attachments: list | None = None

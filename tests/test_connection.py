@@ -130,6 +130,33 @@ async def test_permission_resolve_routes_to_session():
     assert await pending == "allow"
 
 
+async def test_permissions_list_replays_pending_requests():
+    conn = _new_conn()
+    await conn._dispatch({"action": Action.SESSION_START, "session_id": "s1", "prompt": "x"})
+    session = conn.sessions["s1"]
+    pending = asyncio.create_task(session._ask_permission("Bash", {"command": "ls"}, {}))
+    await asyncio.sleep(0)
+    conn._ws.sent.clear()
+
+    # A reconnecting browser asks for outstanding prompts; the node re-emits them.
+    await conn._dispatch({"action": Action.PERMISSIONS_LIST})
+    snapshots = [
+        m["payload"]
+        for m in conn._ws.sent
+        if m["payload"].get("event") == Event.PERMISSIONS_SNAPSHOT
+    ]
+    assert snapshots
+    requests = snapshots[0]["requests"]
+    assert len(requests) == 1
+    assert requests[0]["tool"] == "Bash"
+    assert requests[0]["session_id"] == "s1"
+
+    # Resolving still works and clears the pending set.
+    conn._resolve_permission({"request_id": requests[0]["request_id"], "decision": "allow"})
+    assert await pending == "allow"
+    assert session.pending_permissions() == []
+
+
 async def test_close_removes_session():
     conn = _new_conn()
     await conn._dispatch({"action": Action.SESSION_START, "session_id": "s1", "prompt": "x"})

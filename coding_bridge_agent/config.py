@@ -28,7 +28,9 @@ class Settings:
     heartbeat_interval: float = 15.0
     reconnect_min: float = 1.0
     reconnect_max: float = 30.0
-    permission_timeout: float = 300.0  # 0 → wait indefinitely for the user
+    # Remote approval may arrive via a push notification minutes after the
+    # prompt, so the window is generous. 0 → wait indefinitely for the user.
+    permission_timeout: float = 1800.0
     turn_retry_limit: int = 1  # auto-retries when a provider subprocess crashes
     turn_retry_backoff: float = 0.5  # seconds between turn retries
     outbox_max: int = 5000  # max buffered node→browser events while disconnected
@@ -85,7 +87,7 @@ class Settings:
             node_name=os.environ.get("CODING_BRIDGE_NODE_NAME", ""),
             config_dir=Path(os.environ.get("CODING_BRIDGE_CONFIG_DIR", DEFAULT_CONFIG_DIR)),
             heartbeat_interval=_f("CODING_BRIDGE_HEARTBEAT_INTERVAL", 15.0),
-            permission_timeout=_f("CODING_BRIDGE_PERMISSION_TIMEOUT", 300.0),
+            permission_timeout=_f("CODING_BRIDGE_PERMISSION_TIMEOUT", 1800.0),
             turn_retry_limit=int(_f("CODING_BRIDGE_TURN_RETRY_LIMIT", 1)),
             turn_retry_backoff=_f("CODING_BRIDGE_TURN_RETRY_BACKOFF", 0.5),
             outbox_max=int(_f("CODING_BRIDGE_OUTBOX_MAX", 5000)),

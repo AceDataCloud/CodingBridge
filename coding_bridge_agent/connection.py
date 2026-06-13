@@ -269,6 +269,8 @@ class BridgeConnection:
                 await self._close_session(session_id)
             elif action == Action.PERMISSION_RESOLVE:
                 self._resolve_permission(payload)
+            elif action == Action.PERMISSIONS_LIST:
+                await self._send_pending_permissions()
             elif action == Action.SESSIONS_LIST:
                 await self._send_snapshot()
             elif action == Action.HISTORY_LIST:
@@ -400,6 +402,18 @@ class BridgeConnection:
                 sessions=[s.info() for s in self.sessions.values()],
             )
         )
+
+    async def _send_pending_permissions(self) -> None:
+        """Re-emit every unresolved permission request across all sessions.
+
+        Lets a browser that (re)connects — or follows a push notification — pick
+        up an approval prompt that was raised while it was away, instead of the
+        request sitting blocked until it times out.
+        """
+        requests: list[dict] = []
+        for session in self.sessions.values():
+            requests.extend(session.pending_permissions())
+        await self.send_payload(event_payload(Event.PERMISSIONS_SNAPSHOT, requests=requests))
 
     async def _send_history_list(self, payload: dict) -> None:
         limit = payload.get("limit") or 200

@@ -29,6 +29,8 @@ class Settings:
     reconnect_min: float = 1.0
     reconnect_max: float = 30.0
     permission_timeout: float = 300.0  # 0 → wait indefinitely for the user
+    turn_retry_limit: int = 1  # auto-retries when a provider subprocess crashes
+    turn_retry_backoff: float = 0.5  # seconds between turn retries
     default_cwd: str = ""
     default_model: str | None = None
     claim_url_template: str = DEFAULT_CLAIM_URL
@@ -83,6 +85,8 @@ class Settings:
             config_dir=Path(os.environ.get("CODING_BRIDGE_CONFIG_DIR", DEFAULT_CONFIG_DIR)),
             heartbeat_interval=_f("CODING_BRIDGE_HEARTBEAT_INTERVAL", 15.0),
             permission_timeout=_f("CODING_BRIDGE_PERMISSION_TIMEOUT", 300.0),
+            turn_retry_limit=int(_f("CODING_BRIDGE_TURN_RETRY_LIMIT", 1)),
+            turn_retry_backoff=_f("CODING_BRIDGE_TURN_RETRY_BACKOFF", 0.5),
             default_model=os.environ.get("CODING_BRIDGE_MODEL") or None,
             claim_url_template=os.environ.get("CODING_BRIDGE_CLAIM_URL", DEFAULT_CLAIM_URL),
             log_level=os.environ.get("CODING_BRIDGE_LOG_LEVEL", "INFO"),

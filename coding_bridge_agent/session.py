@@ -3,15 +3,51 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import logging
 import uuid
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 from .permissions import PermissionBroker
 from .protocol import Event, event_payload
 from .providers.base import AskPermissionFn, EmitFn, ProviderFactory
 
+logger = logging.getLogger("coding-bridge-agent.session")
+
 # Distinguishes "caller omitted this override" from "caller cleared it to default".
 _UNSET: Any = object()
+
+# A fresh coroutine factory so a turn can be re-awaited on retry.
+_TurnFactory = Callable[[], Awaitable[None]]
+
+
+def _classify_error(exc: Exception) -> dict[str, Any]:
+    """Turn a provider exception into a structured, browser-friendly descriptor.
+
+    ``code`` drives the frontend's localized message; ``fatal`` means the
+    provider subprocess is dead and must be reset; ``retryable`` means the turn
+    crashed at the transport level (e.g. the claude CLI segfaulted on spawn) and
+    is worth retrying once.
+    """
+    name = type(exc).__name__
+    exit_code = getattr(exc, "exit_code", None)
+    stderr = getattr(exc, "stderr", None)
+    if name == "ProcessError" or exit_code is not None:
+        code, fatal, retryable = "process_crashed", True, True
+    elif name in {"CLIConnectionError", "CLIJSONDecodeError"}:
+        code, fatal, retryable = "transport_error", True, True
+    elif name == "CLINotFoundError":
+        code, fatal, retryable = "cli_not_found", True, False
+    else:
+        code, fatal, retryable = "provider_error", False, False
+    return {
+        "code": code,
+        "exception": name,
+        "exit_code": exit_code,
+        "stderr": stderr or None,
+        "fatal": fatal,
+        "retryable": retryable,
+    }
 
 
 class Session:
@@ -45,6 +81,9 @@ class Session:
         ask: AskPermissionFn = self._ask_permission
         self._provider = provider_factory(provider, session_id, self._emit, ask)
         self._task: asyncio.Task[None] | None = None
+        # Set by _emit; lets _guard tell a no-op crash (safe to retry) from one
+        # that already streamed output or ran a tool (unsafe to replay).
+        self._turn_emitted = False
 
     def set_trace(self, trace_id: str | None) -> None:
         """Adopt the trace id carried by the latest turn (if any)."""
@@ -53,6 +92,7 @@ class Session:
 
     async def _emit(self, payload: dict[str, Any]) -> None:
         """Stamp the active trace id onto every outgoing event, then forward."""
+        self._turn_emitted = True
         if self.trace_id and "trace_id" not in payload:
             payload = {**payload, "trace_id": self.trace_id}
         await self._raw_emit(payload)
@@ -91,7 +131,7 @@ class Session:
             )
         )
         self._spawn(
-            self._provider.start(
+            lambda: self._provider.start(
                 prompt,
                 cwd=self.cwd,
                 model=self.model,
@@ -122,7 +162,7 @@ class Session:
         if permission_mode is not _UNSET and permission_mode:
             self.permission_mode = permission_mode
         self._spawn(
-            self._provider.send(
+            lambda: self._provider.send(
                 prompt,
                 images=images,
                 attachments=attachments,
@@ -132,28 +172,78 @@ class Session:
             )
         )
 
-    def _spawn(self, coro: Any) -> None:
+    def _spawn(self, make_turn: _TurnFactory) -> None:
         if self._task and not self._task.done():
             # A turn is already running; chain after it so inputs stay ordered.
-            self._task = asyncio.create_task(self._chain(self._task, coro))
+            self._task = asyncio.create_task(self._chain(self._task, make_turn))
             return
-        self._task = asyncio.create_task(self._guard(coro))
+        self._task = asyncio.create_task(self._guard(make_turn))
 
-    async def _chain(self, previous: asyncio.Task[None], coro: Any) -> None:
+    async def _chain(self, previous: asyncio.Task[None], make_turn: _TurnFactory) -> None:
         with contextlib.suppress(Exception):
             await previous
-        await self._guard(coro)
+        await self._guard(make_turn)
 
-    async def _guard(self, coro: Any) -> None:
+    async def _guard(self, make_turn: _TurnFactory) -> None:
         self.status = "running"
+        attempt = 0
         try:
-            await coro
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:  # noqa: BLE001 - surface to the browser, keep node alive
-            await self._emit(event_payload(Event.SESSION_ERROR, self.session_id, message=str(exc)))
+            while True:
+                self._turn_emitted = False
+                try:
+                    await make_turn()
+                    return
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:  # noqa: BLE001 - surface to browser, keep node alive
+                    info = _classify_error(exc)
+                    # Only retry a clean crash: transport-level failure that hadn't
+                    # streamed anything yet, so replaying can't duplicate effects.
+                    if (
+                        info["retryable"]
+                        and not self._turn_emitted
+                        and attempt < self._settings.turn_retry_limit
+                    ):
+                        attempt += 1
+                        logger.warning(
+                            "session %s turn crashed (%s exit_code=%s); retry %d/%d",
+                            self.session_id, info["exception"], info["exit_code"],
+                            attempt, self._settings.turn_retry_limit,
+                        )
+                        await self._reset_provider()
+                        await asyncio.sleep(self._settings.turn_retry_backoff)
+                        continue
+                    await self._fail(exc, info)
+                    return
         finally:
             self.status = "idle"
+
+    async def _fail(self, exc: Exception, info: dict[str, Any]) -> None:
+        """Log the crash (rides node.log → CLS) and report it to the browser."""
+        logger.exception(
+            "session %s turn failed: code=%s exception=%s exit_code=%s cwd=%s model=%s",
+            self.session_id, info["code"], info["exception"], info["exit_code"],
+            self.cwd, self.model,
+        )
+        await self._emit(
+            event_payload(
+                Event.SESSION_ERROR,
+                self.session_id,
+                message=str(exc),
+                code=info["code"],
+                exception=info["exception"],
+                exit_code=info["exit_code"],
+                stderr=info["stderr"],
+            )
+        )
+        # A dead subprocess leaves the provider unusable; reset so the next turn
+        # reconnects instead of operating on a stale client.
+        if info["fatal"]:
+            await self._reset_provider()
+
+    async def _reset_provider(self) -> None:
+        with contextlib.suppress(Exception):
+            await self._provider.aclose()
 
     async def interrupt(self) -> None:
         await self._provider.interrupt()

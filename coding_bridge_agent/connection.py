@@ -174,6 +174,8 @@ class BridgeConnection:
                 await self._start_session(payload)
             elif action == Action.SESSION_SEND:
                 await self._send_to_session(session_id, payload)
+            elif action == Action.SESSION_EDIT:
+                await self._edit_session(session_id, payload)
             elif action == Action.SESSION_INTERRUPT:
                 await self._interrupt_session(session_id)
             elif action == Action.SESSION_CLOSE:
@@ -265,6 +267,23 @@ class BridgeConnection:
             payload.get("prompt", ""),
             payload.get("images"),
             payload.get("attachments"),
+            **_session_overrides(payload),
+        )
+
+    async def _edit_session(self, session_id: str | None, payload: dict) -> None:
+        session = self.sessions.get(session_id) if session_id else None
+        if session is None:
+            await self.send_payload(
+                event_payload(Event.SESSION_ERROR, session_id, message="unknown session")
+            )
+            return
+        session.set_trace(payload.get("trace_id"))
+        await session.edit(
+            payload.get("prompt", ""),
+            cut_uuid=payload.get("cut_uuid") or None,
+            images=payload.get("images"),
+            attachments=payload.get("attachments"),
+            restore_code=bool(payload.get("restore_code")),
             **_session_overrides(payload),
         )
 

@@ -69,6 +69,29 @@ def claude_known_ids(session_id: str) -> tuple[set[str], set[str]]:
     return line_uuids, msg_ids
 
 
+def claude_user_uuid_after(session_id: str, cut_uuid: str | None) -> str | None:
+    """Return the uuid of the first user turn after ``cut_uuid`` in a transcript.
+
+    Used as the ``rewind_files`` checkpoint id when an edit also restores code:
+    we roll files back to the state captured before the edited turn ran, which
+    is keyed by that turn's user-message uuid. ``cut_uuid=None`` means the very
+    first user turn. Returns ``None`` when no transcript or no such turn.
+    """
+    path = _claude_path(session_id)
+    if path is None:
+        return None
+    seen_cut = cut_uuid is None
+    for rec in _iter_jsonl(path):
+        uid = rec.get("uuid")
+        if not seen_cut:
+            if uid == cut_uuid:
+                seen_cut = True
+            continue
+        if rec.get("type") == "user" and isinstance(uid, str):
+            return uid
+    return None
+
+
 def read_session(provider: str, session_id: str) -> dict[str, Any]:
     """Return a normalised transcript ``{provider,title,cwd,model,...,events}``."""
     if provider == "claude":

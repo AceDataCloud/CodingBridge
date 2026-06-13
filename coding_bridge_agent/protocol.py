@@ -48,6 +48,9 @@ class Action:
 
     SESSION_START = "session.start"
     SESSION_SEND = "session.send"
+    # Edit a past prompt: fork the transcript at `cut_uuid`, dropping that turn
+    # and everything after, then re-run with the edited prompt (Claude only).
+    SESSION_EDIT = "session.edit"
     SESSION_INTERRUPT = "session.interrupt"
     SESSION_CLOSE = "session.close"
     PERMISSION_RESOLVE = "permission.resolve"

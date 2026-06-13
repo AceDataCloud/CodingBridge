@@ -55,6 +55,11 @@ class ClaudeProvider:
         self._stream_text_ord = 0
         self._open_text: dict[Any, dict[str, Any]] = {}
         self._saw_text_stream = False
+        # The SDK/CLI's own session id (the resume target) and the uuid of the
+        # last transcript message seen. Reported on each turn's result so the
+        # browser can fork the conversation here when a prompt is edited.
+        self._sdk_session_id: str | None = None
+        self._last_msg_uuid: str | None = None
         # Resume-replay guard (first resumed turn only); see _gated_receive.
         self._gate_active = False
         self._gate_uuids: set[str] = set()
@@ -123,6 +128,53 @@ class ClaudeProvider:
             return
         await self._turn(self._with_attachments(prompt, images, attachments))
 
+    async def edit(
+        self,
+        prompt: str,
+        *,
+        cut_uuid: str | None,
+        model: str | None = None,
+        permission_mode: str | None = None,
+        effort: str | None = None,
+        images: list | None = None,
+        attachments: list | None = None,
+        restore_code: bool = False,
+    ) -> None:
+        """Edit a past prompt: fork the transcript at ``cut_uuid`` and re-run.
+
+        ``cut_uuid`` is the uuid of the last transcript message to KEEP (the end
+        of the turn before the edited one); ``None`` rebuilds from an empty
+        session. The original session is left intact (``--fork-session``); the
+        edited prompt becomes the first turn of the fork.
+        """
+        resume_id = self._sdk_session_id
+        # Optionally roll the working tree back to the edited turn before forking.
+        if restore_code and resume_id and self._client and hasattr(self._client, "rewind_files"):
+            from .. import history
+
+            target = history.claude_user_uuid_after(resume_id, cut_uuid)
+            if target:
+                with contextlib.suppress(Exception):
+                    await self._client.rewind_files(target)
+        await self.aclose()
+        self._cwd = self._cwd or self._settings.default_cwd
+        fork = bool(cut_uuid and resume_id)
+        resume = resume_id if fork else None
+        extra: dict[str, str | None] | None = {"resume-session-at": cut_uuid} if fork else None
+        self._arm_resume_guard(resume)
+        await self._ensure_client(
+            cwd=self._cwd,
+            model=model,
+            permission_mode=permission_mode or self._permission_mode,
+            effort=effort,
+            resume=resume,
+            fork_session=fork,
+            extra_args=extra,
+        )
+        if await self._maybe_handle_slash(prompt):
+            return
+        await self._turn(self._with_attachments(prompt, images, attachments))
+
     async def _apply_runtime_changes(
         self, model: str | None, permission_mode: str | None
     ) -> None:
@@ -152,6 +204,8 @@ class ClaudeProvider:
         permission_mode: str,
         effort: str | None = None,
         resume: str | None = None,
+        fork_session: bool = False,
+        extra_args: dict[str, str | None] | None = None,
     ) -> None:
         if self._connected:
             return
@@ -170,6 +224,19 @@ class ClaudeProvider:
             setting_sources=["user", "project", "local"],
             resume=resume or None,
         )
+        # Fork on resume so editing a prompt branches a NEW session and leaves
+        # the original transcript intact (mirrors `claude --fork-session`).
+        if fork_session and hasattr(options, "fork_session"):
+            options.fork_session = True
+        # Pass through CLI flags the typed options don't model — notably
+        # `--resume-session-at <uuid>`, which truncates the resumed transcript at
+        # a message so the edited turn re-runs from that point.
+        if extra_args and hasattr(options, "extra_args"):
+            options.extra_args = {**(options.extra_args or {}), **extra_args}
+        # Track file changes so an edit can optionally roll the working tree back
+        # to the edited turn via `ClaudeSDKClient.rewind_files()`.
+        if hasattr(options, "enable_file_checkpointing"):
+            options.enable_file_checkpointing = True
         # Stream assistant text token-by-token when the SDK supports it.
         if hasattr(options, "include_partial_messages"):
             options.include_partial_messages = True
@@ -260,6 +327,7 @@ class ClaudeProvider:
                 self._gate_saw_replay = True
                 return False  # drop a replayed complete message
             self._gate_saw_genuine = True
+            self._note_ids(message)
             for block in content:
                 await self._handle_block(block)
             return False
@@ -300,6 +368,7 @@ class ClaudeProvider:
         return attachment_store.attachment_note(prompt, files, image_paths)
 
     async def _handle_message(self, message: Any) -> None:
+        self._note_ids(message)
         stream_event = getattr(message, "event", None)
         if isinstance(stream_event, dict):
             await self._handle_stream_event(stream_event)
@@ -326,8 +395,26 @@ class ClaudeProvider:
                     is_error=bool(getattr(message, "is_error", False)),
                     result=result,
                     cost_usd=getattr(message, "total_cost_usd", None),
+                    # Fork point for an edit of the NEXT prompt: the last kept
+                    # transcript message, plus the session to resume from.
+                    cut_uuid=self._last_msg_uuid,
+                    sdk_session_id=self._sdk_session_id,
                 )
             )
+
+    def _note_ids(self, message: Any) -> None:
+        """Track the SDK session id and the latest transcript message uuid.
+
+        These feed the fork point reported on each turn's result, so an edit of a
+        later prompt can resume this session truncated at the right message.
+        """
+        sid = getattr(message, "session_id", None)
+        if isinstance(sid, str) and sid:
+            self._sdk_session_id = sid
+        if isinstance(getattr(message, "content", None), list):
+            uid = getattr(message, "uuid", None)
+            if isinstance(uid, str) and uid:
+                self._last_msg_uuid = uid
 
     async def _emit_status(self) -> None:
         """Synthesize a `/status` answer from the cached initialize info + session."""

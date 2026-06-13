@@ -53,6 +53,9 @@ def _provider(
     cli: str,
     models: list[dict[str, str]],
     efforts: list[str],
+    *,
+    supports_edit: bool = False,
+    supports_code_restore: bool = False,
 ) -> dict[str, Any]:
     return {
         "name": name,
@@ -62,6 +65,13 @@ def _provider(
         "efforts": efforts,
         "permission_modes": list(_PERMISSION_MODES),
         "allow_custom_model": True,
+        # Whether a past prompt can be edited (the conversation forked at that
+        # turn). Claude has first-class `--resume-session-at` / `--fork-session`;
+        # Codex has no such primitive, so its prompts are not editable.
+        "supports_edit": supports_edit,
+        # Whether editing can also roll back on-disk file changes (file
+        # checkpointing), so the browser can offer a "restore code" choice.
+        "supports_code_restore": supports_code_restore,
     }
 
 
@@ -69,7 +79,15 @@ def describe() -> dict[str, Any]:
     """Build the capabilities descriptor sent to the browser."""
     return {
         "providers": [
-            _provider("claude", "Claude Code", "claude", _CLAUDE_MODELS, _CLAUDE_EFFORTS),
+            _provider(
+                "claude",
+                "Claude Code",
+                "claude",
+                _CLAUDE_MODELS,
+                _CLAUDE_EFFORTS,
+                supports_edit=True,
+                supports_code_restore=True,
+            ),
             _provider("codex", "Codex", "codex", _CODEX_MODELS, _CODEX_EFFORTS),
         ],
     }

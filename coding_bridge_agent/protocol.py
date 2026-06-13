@@ -11,11 +11,14 @@ import time
 import uuid
 from typing import Any
 
-PROTOCOL_VERSION = 1
+PROTOCOL_VERSION = 2
 
 # --- Outer envelope types (must match coding-bridge) -----------------------
 BROWSER_TO_NODE = "browser.to_node"
 BROWSER_LIST_NODES = "browser.list_nodes"
+# Browser reconnected: ask the relay to replay each session's events past a
+# cursor. Handled by the relay from its event log; never reaches the node.
+BROWSER_RESUME = "browser.resume"
 NODE_TO_BROWSER = "node.to_browser"
 NODES_SNAPSHOT = "nodes.snapshot"
 NODE_STATUS = "node.status"
@@ -26,6 +29,9 @@ NODE_HEARTBEAT_ACK = "node.heartbeat_ack"
 # Node-originated structured log line. The node holds no CLS credentials, so the
 # relay is its log sink: it ships these to Tencent CLS for end-to-end tracing.
 NODE_LOG = "node.log"
+# Relay → node: highest node-assigned delivery seq durably appended to the event
+# log, so the node can trim its outbox. Payload: { "up_to_node_seq": <int> }.
+NODE_ACK = "node.ack"
 
 
 def envelope(
@@ -83,6 +89,34 @@ class Event:
     FS_LIST = "fs.list"
     CAPABILITIES = "capabilities"
     PONG = "pong"
+    # A past prompt was edited: the conversation forks at `cut_uuid`. Sequenced &
+    # logged like any event so a reconnecting browser folds it into a view
+    # truncation on replay (not just an optimistic local one). See the design doc.
+    SESSION_REWOUND = "session.rewound"
+    # The live stream lost events the relay/node could not retain; the browser
+    # should resync the session from history rather than trust the cursor.
+    SESSION_STREAM_TRUNCATED = "session.stream_truncated"
+
+
+# Request-scoped responses, not live session events: forwarded fire-and-forget,
+# never given a node_seq nor placed in the durable log / outbox. (A reconnecting
+# browser re-requests these itself.) Everything else carrying a session_id is a
+# durable live event.
+EPHEMERAL_EVENTS: frozenset[str] = frozenset(
+    {
+        Event.SESSIONS_SNAPSHOT,
+        Event.HISTORY_SNAPSHOT,
+        Event.HISTORY_DETAIL,
+        Event.FS_LIST,
+        Event.CAPABILITIES,
+        Event.PONG,
+    }
+)
+
+
+def is_durable_event(payload: dict[str, Any]) -> bool:
+    """A node→browser event worth reliable delivery: has a session and is live."""
+    return bool(payload.get("session_id")) and payload.get("event") not in EPHEMERAL_EVENTS
 
 
 def event_payload(

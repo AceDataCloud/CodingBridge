@@ -10,6 +10,7 @@ from pathlib import Path
 from . import logs, store
 from .config import Settings
 from .connection import BridgeConnection
+from .locking import AlreadyRunning, SingleInstance
 from .pairing import PairingError, poll_for_token, start_pairing
 
 
@@ -75,12 +76,27 @@ async def _do_pair(settings: Settings) -> str:
 
 
 async def _run_connection(settings: Settings, token: str) -> None:
+    # Refuse to start a second daemon for this device: two agents sharing one
+    # node token fight over the relay slot and tear down every session.
+    lock = SingleInstance(settings.config_dir / "agent.lock")
+    try:
+        lock.acquire()
+    except AlreadyRunning:
+        print(
+            "Another coding-bridge-agent is already running for this device.\n"
+            "Stop it before starting a new one — two instances fight over the\n"
+            "connection and break every session. If it autostarts (a service or\n"
+            "scheduled task), do not also run it manually.",
+            file=sys.stderr,
+        )
+        raise SystemExit(1) from None
     connection = BridgeConnection(settings, token)
     print(f"  Coding Bridge agent running. Node: {settings.node_name}. Press Ctrl-C to stop.")
     try:
         await connection.run()
     finally:
         await connection.aclose()
+        lock.release()
 
 
 def cmd_pair(args: argparse.Namespace) -> None:

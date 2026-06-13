@@ -111,3 +111,38 @@ async def test_overflow_drops_oldest_and_warns_on_flush():
     assert events[0] == Event.SESSION_STREAM_TRUNCATED
     assert _node_to_browser(fresh)[0]["payload"]["reason"] == "node_outbox_overflow"
     assert not conn._truncated_sessions  # cleared after warning
+
+
+async def test_duplicate_command_is_executed_once():
+    conn = _conn()
+    started = []
+    orig = conn._dispatch
+
+    async def spy(payload):
+        started.append(payload.get("session_id"))
+        await orig(payload)
+
+    conn._dispatch = spy
+    cmd = protocol.envelope(
+        protocol.BROWSER_TO_NODE,
+        {"action": "ping"},
+        cmd_id="dup-1",
+    )
+    await conn._on_raw(json.dumps(cmd))
+    await conn._on_raw(json.dumps(cmd))  # relay redelivered the same queued command
+    assert len(started) == 1  # dispatched exactly once
+
+
+async def test_commands_without_cmd_id_are_not_deduped():
+    conn = _conn()
+    seen = []
+    conn._dispatch = lambda payload: seen.append(payload) or _async_none()
+    for _ in range(2):
+        await conn._on_raw(
+            json.dumps(protocol.envelope(protocol.BROWSER_TO_NODE, {"action": "ping"}))
+        )
+    assert len(seen) == 2
+
+
+async def _async_none():
+    return None

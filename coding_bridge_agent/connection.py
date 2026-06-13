@@ -51,6 +51,10 @@ class BridgeConnection:
         self._node_seq = 0
         self._outbox: deque[dict] = deque()
         self._truncated_sessions: set[str] = set()
+        # Dedup browser commands the relay may redeliver (a command queued across
+        # our reconnect, then flushed). Bounded ring of recently seen cmd_ids.
+        self._seen_cmds: set[str] = set()
+        self._seen_cmd_order: deque[str] = deque()
 
     def capabilities(self) -> list[str]:
         # Reflect the providers whose CLI is actually installed, plus history.
@@ -183,6 +187,18 @@ class BridgeConnection:
             if session_id:
                 self._truncated_sessions.add(session_id)
 
+    def _is_duplicate_command(self, cmd_id: str | None) -> bool:
+        """Track recently seen command ids; True if this one was already handled."""
+        if not cmd_id:
+            return False
+        if cmd_id in self._seen_cmds:
+            return True
+        self._seen_cmds.add(cmd_id)
+        self._seen_cmd_order.append(cmd_id)
+        if len(self._seen_cmd_order) > 1000:
+            self._seen_cmds.discard(self._seen_cmd_order.popleft())
+        return False
+
     async def send_log(self, payload: dict) -> None:
         """Forward a structured log record to the relay (which ships it to CLS)."""
         await self._send_envelope(
@@ -218,6 +234,11 @@ class BridgeConnection:
             return
         msg_type = message.get("type")
         if msg_type == protocol.BROWSER_TO_NODE:
+            # Drop a command the relay redelivers (it had queued the command
+            # across our reconnect, then flushed it); running it twice would
+            # re-spawn a turn or re-run a prompt.
+            if self._is_duplicate_command(message.get("cmd_id")):
+                return
             await self._dispatch(message.get("payload") or {})
         elif msg_type == protocol.NODE_ACK:
             up_to = (message.get("payload") or {}).get("up_to_node_seq")

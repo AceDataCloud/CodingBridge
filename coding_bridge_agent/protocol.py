@@ -60,6 +60,9 @@ class Action:
     SESSION_INTERRUPT = "session.interrupt"
     SESSION_CLOSE = "session.close"
     PERMISSION_RESOLVE = "permission.resolve"
+    # Browser (re)connected / followed a notification: re-emit every pending
+    # permission request so the approval prompt survives a missed live event.
+    PERMISSIONS_LIST = "permissions.list"
     SESSIONS_LIST = "sessions.list"
     HISTORY_LIST = "history.list"
     HISTORY_GET = "history.get"
@@ -79,6 +82,9 @@ class Event:
     SESSION_TOOL_RESULT = "session.tool_result"
     PERMISSION_REQUEST = "permission.request"
     PERMISSION_RESOLVED = "permission.resolved"
+    # Reply to PERMISSIONS_LIST: every still-pending request in one shot. Carries
+    # no session_id (it spans sessions) so it is ephemeral, not a durable event.
+    PERMISSIONS_SNAPSHOT = "permissions.snapshot"
     SESSION_RESULT = "session.result"
     SESSION_NOTICE = "session.notice"
     SESSION_ERROR = "session.error"
@@ -105,6 +111,7 @@ class Event:
 EPHEMERAL_EVENTS: frozenset[str] = frozenset(
     {
         Event.SESSIONS_SNAPSHOT,
+        Event.PERMISSIONS_SNAPSHOT,
         Event.HISTORY_SNAPSHOT,
         Event.HISTORY_DETAIL,
         Event.FS_LIST,

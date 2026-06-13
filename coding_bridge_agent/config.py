@@ -31,6 +31,7 @@ class Settings:
     permission_timeout: float = 300.0  # 0 → wait indefinitely for the user
     turn_retry_limit: int = 1  # auto-retries when a provider subprocess crashes
     turn_retry_backoff: float = 0.5  # seconds between turn retries
+    outbox_max: int = 5000  # max buffered node→browser events while disconnected
     default_cwd: str = ""
     default_model: str | None = None
     claim_url_template: str = DEFAULT_CLAIM_URL
@@ -87,6 +88,7 @@ class Settings:
             permission_timeout=_f("CODING_BRIDGE_PERMISSION_TIMEOUT", 300.0),
             turn_retry_limit=int(_f("CODING_BRIDGE_TURN_RETRY_LIMIT", 1)),
             turn_retry_backoff=_f("CODING_BRIDGE_TURN_RETRY_BACKOFF", 0.5),
+            outbox_max=int(_f("CODING_BRIDGE_OUTBOX_MAX", 5000)),
             default_model=os.environ.get("CODING_BRIDGE_MODEL") or None,
             claim_url_template=os.environ.get("CODING_BRIDGE_CLAIM_URL", DEFAULT_CLAIM_URL),
             log_level=os.environ.get("CODING_BRIDGE_LOG_LEVEL", "INFO"),

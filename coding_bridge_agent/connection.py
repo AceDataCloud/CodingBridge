@@ -10,6 +10,7 @@ import asyncio
 import contextlib
 import json
 import logging
+from collections import deque
 
 import websockets
 
@@ -43,6 +44,13 @@ class BridgeConnection:
         self._stop = asyncio.Event()
         self._loop: asyncio.AbstractEventLoop | None = None
         self._log_forwarder: logs.BridgeLogForwarder | None = None
+        # Reliable delivery: durable live events get a monotonic node_seq and sit
+        # in the outbox until the relay acks them, so a reconnect resends the tail
+        # instead of dropping it. node_seq is per node process (never reset); the
+        # relay dedups resends by envelope id.
+        self._node_seq = 0
+        self._outbox: deque[dict] = deque()
+        self._truncated_sessions: set[str] = set()
 
     def capabilities(self) -> list[str]:
         # Reflect the providers whose CLI is actually installed, plus history.
@@ -80,6 +88,8 @@ class BridgeConnection:
                 self._ws = ws
                 logger.info("connected to bridge as node %s", self.node_token[:12])
                 self._attach_log_forwarder()
+                # Resend any live events the relay never acked before the drop.
+                await self._flush_outbox()
                 heartbeat = asyncio.create_task(self._heartbeat())
                 try:
                     async for raw in ws:
@@ -110,16 +120,68 @@ class BridgeConnection:
             return
 
     async def _send_envelope(self, env: dict) -> None:
+        """Transmit one envelope if connected; a no-op (drop) while offline.
+
+        Heartbeats and logs use this directly — losing them across a reconnect is
+        harmless. Durable browser events go through :meth:`send_payload`, which
+        buffers them in the outbox so the drop here is recovered on reconnect.
+        """
         ws = self._ws
         if ws is None:
             return
-        await ws.send(json.dumps(env))
+        # Best-effort: a send racing a socket close must not crash the daemon;
+        # durable events remain in the outbox and resend on the next connect.
+        with contextlib.suppress(Exception):  # noqa: BLE001
+            await ws.send(json.dumps(env))
 
     async def send_payload(self, payload: dict) -> None:
-        """Send an inner event payload toward the owner's browsers."""
-        await self._send_envelope(
-            protocol.envelope(protocol.NODE_TO_BROWSER, payload, from_node=self.node_token)
-        )
+        """Send an inner event payload toward the owner's browsers.
+
+        Durable live events (a session's streamed output, permissions, rewind)
+        get a monotonic ``node_seq`` and are buffered in the outbox until the
+        relay acks them — so a reconnect resends the tail rather than losing it.
+        Request-scoped responses (history/fs/capabilities snapshots) are sent
+        fire-and-forget; a reconnecting browser re-requests those itself.
+        """
+        env = protocol.envelope(protocol.NODE_TO_BROWSER, payload, from_node=self.node_token)
+        if protocol.is_durable_event(payload):
+            self._node_seq += 1
+            env["node_seq"] = self._node_seq
+            self._outbox.append(env)
+            self._trim_outbox()
+        await self._send_envelope(env)
+
+    async def _flush_outbox(self) -> None:
+        """On (re)connect, warn about any overflow gap, then resend the outbox."""
+        for session_id in list(self._truncated_sessions):
+            await self._send_envelope(
+                protocol.envelope(
+                    protocol.NODE_TO_BROWSER,
+                    event_payload(
+                        Event.SESSION_STREAM_TRUNCATED,
+                        session_id,
+                        reason="node_outbox_overflow",
+                        resume_with="history",
+                    ),
+                    from_node=self.node_token,
+                )
+            )
+        self._truncated_sessions.clear()
+        for env in list(self._outbox):
+            await self._send_envelope(env)
+
+    def _ack_outbox(self, up_to_node_seq: int) -> None:
+        """Drop outbox events the relay has durably stored (contiguous prefix)."""
+        while self._outbox and self._outbox[0].get("node_seq", 0) <= up_to_node_seq:
+            self._outbox.popleft()
+
+    def _trim_outbox(self) -> None:
+        """Bound the outbox; on overflow drop oldest and flag a resync for it."""
+        while len(self._outbox) > self.settings.outbox_max:
+            dropped = self._outbox.popleft()
+            session_id = (dropped.get("payload") or {}).get("session_id")
+            if session_id:
+                self._truncated_sessions.add(session_id)
 
     async def send_log(self, payload: dict) -> None:
         """Forward a structured log record to the relay (which ships it to CLS)."""
@@ -157,6 +219,10 @@ class BridgeConnection:
         msg_type = message.get("type")
         if msg_type == protocol.BROWSER_TO_NODE:
             await self._dispatch(message.get("payload") or {})
+        elif msg_type == protocol.NODE_ACK:
+            up_to = (message.get("payload") or {}).get("up_to_node_seq")
+            if isinstance(up_to, int):
+                self._ack_outbox(up_to)
         elif msg_type == protocol.NODE_REGISTERED:
             logger.info("registered with bridge")
 

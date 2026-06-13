@@ -4,7 +4,7 @@ from coding_bridge_agent.protocol import Event, envelope, event_payload
 
 def test_envelope_shape():
     env = envelope(protocol.NODE_HEARTBEAT, {"capabilities": ["claude"]}, from_node="n1")
-    assert env["v"] == 1
+    assert env["v"] == protocol.PROTOCOL_VERSION
     assert env["type"] == "node.heartbeat"
     assert env["payload"] == {"capabilities": ["claude"]}
     assert env["from_node"] == "n1"

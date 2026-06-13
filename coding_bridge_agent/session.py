@@ -192,6 +192,19 @@ class Session:
             self.effort = effort or None
         if permission_mode is not _UNSET and permission_mode:
             self.permission_mode = permission_mode
+        # Announce the fork as a sequenced, logged event so a browser that
+        # reconnects replays it and truncates its view to the cut point — instead
+        # of replaying the abandoned turns. `cut_uuid` matches the result event
+        # the browser rendered for the kept turn; `prompt` lets it re-show the
+        # edited user message after a history-less replay.
+        await self._emit(
+            event_payload(
+                Event.SESSION_REWOUND,
+                self.session_id,
+                cut_uuid=cut_uuid,
+                prompt=prompt,
+            )
+        )
         self._spawn(
             lambda: self._provider.edit(
                 prompt,

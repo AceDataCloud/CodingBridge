@@ -389,3 +389,85 @@ async def test_capabilities_get_returns_descriptor():
     names = [p["name"] for p in caps[0]["providers"]]
     assert names == ["claude", "codex"]
 
+
+# --- Session identity (re-key on real id, reattach on resume) ----------------
+class IdentifyingProvider(FakeProvider):
+    """A provider that announces its real (SDK) id on the first turn, like Claude."""
+
+    real_id = "real-sdk-id"
+
+    async def start(self, prompt, **kwargs):
+        await super().start(prompt, **kwargs)
+        await self.emit(
+            protocol.event_payload(
+                Event.SESSION_IDENTIFIED, self.session_id, sdk_session_id=self.real_id
+            )
+        )
+
+
+def _identifying_conn():
+    settings = Settings(bridge_url="https://bridge.test", permission_timeout=0.2)
+    conn = BridgeConnection(
+        settings, "node_tok", provider_factory=lambda p, s, e, a: IdentifyingProvider(p, s, e, a)
+    )
+    conn._ws = FakeWS()
+    return conn
+
+
+async def test_start_rekeys_session_to_real_id():
+    conn = _identifying_conn()
+    await conn._dispatch({"action": Action.SESSION_START, "session_id": "prov-1", "prompt": "hi"})
+    await asyncio.sleep(0.01)
+    # Registry is keyed by the real id; the provisional id resolves via alias.
+    assert "real-sdk-id" in conn.sessions
+    assert "prov-1" not in conn.sessions
+    assert conn._session("prov-1") is conn.sessions["real-sdk-id"]
+    assert conn._session("real-sdk-id") is conn.sessions["real-sdk-id"]
+    # The browser is told to re-key.
+    assert Event.SESSION_IDENTIFIED in _events(conn)
+
+
+async def test_resume_reattaches_to_live_session():
+    conn = _identifying_conn()
+    await conn._dispatch(
+        {"action": Action.SESSION_START, "session_id": "prov-1", "prompt": "first"}
+    )
+    await asyncio.sleep(0.01)
+    session = conn.sessions["real-sdk-id"]
+    # Resuming from history addresses the real id: continue the live session
+    # rather than spawning a second client over the same transcript.
+    await conn._dispatch(
+        {
+            "action": Action.SESSION_START,
+            "session_id": "real-sdk-id",
+            "prompt": "again",
+            "resume_session_id": "real-sdk-id",
+        }
+    )
+    await asyncio.sleep(0.01)
+    assert len(conn.sessions) == 1
+    assert conn.sessions["real-sdk-id"] is session
+    assert session._provider.prompts == ["first", "again"]
+
+
+async def test_history_list_marks_live_sessions_running(monkeypatch):
+    from coding_bridge_agent import history
+
+    conn = _identifying_conn()
+    await conn._dispatch({"action": Action.SESSION_START, "session_id": "prov-1", "prompt": "hi"})
+    await asyncio.sleep(0.01)
+    monkeypatch.setattr(
+        history,
+        "list_sessions",
+        lambda limit=200: [
+            {"provider": "claude", "session_id": "real-sdk-id"},
+            {"provider": "claude", "session_id": "other"},
+        ],
+    )
+    await conn._dispatch({"action": Action.HISTORY_LIST})
+    snapshot = next(
+        m["payload"] for m in conn._ws.sent if m["payload"].get("event") == Event.HISTORY_SNAPSHOT
+    )
+    by_id = {s["session_id"]: s["running"] for s in snapshot["sessions"]}
+    assert by_id == {"real-sdk-id": True, "other": False}
+

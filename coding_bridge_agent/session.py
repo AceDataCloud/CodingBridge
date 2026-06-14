@@ -66,8 +66,12 @@ class Session:
         effort: str | None = None,
         resume: str | None = None,
         trace_id: str | None = None,
+        on_rekey: Callable[[str, str], None] | None = None,
     ) -> None:
         self.session_id = session_id
+        # Called once when the provider reports its real (SDK) session id, so the
+        # owning connection re-keys its registry from the provisional id to it.
+        self._on_rekey = on_rekey
         self.status = "idle"
         self.provider = provider
         self.cwd = cwd
@@ -100,6 +104,16 @@ class Session:
         sdk_sid = payload.get("sdk_session_id")
         if isinstance(sdk_sid, str) and sdk_sid:
             self._remember_settings(sdk_sid)
+        # The provider learned its real id: adopt it as this session's canonical
+        # id and let the connection re-key its registry. From here every event the
+        # provider emits already carries the new id, so the browser and node agree.
+        is_identified = payload.get("event") == Event.SESSION_IDENTIFIED
+        if is_identified and isinstance(sdk_sid, str) and sdk_sid:
+            old_id = self.session_id
+            if sdk_sid != old_id:
+                self.session_id = sdk_sid
+                if self._on_rekey is not None:
+                    self._on_rekey(old_id, sdk_sid)
         if self.trace_id and "trace_id" not in payload:
             payload = {**payload, "trace_id": self.trace_id}
         await self._raw_emit(payload)

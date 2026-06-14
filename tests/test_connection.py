@@ -450,17 +450,52 @@ async def test_resume_reattaches_to_live_session():
     assert session._provider.prompts == ["first", "again"]
 
 
-async def test_history_list_marks_live_sessions_running(monkeypatch):
+async def test_history_list_does_not_flag_idle_in_memory_session(monkeypatch):
+    """A completed session stays in the registry (reattachable) but is idle, so it
+    must NOT be flagged running — otherwise every in-memory session shows a live
+    dot in the drawer."""
     from coding_bridge_agent import history
 
-    conn = _identifying_conn()
+    conn = _identifying_conn()  # IdentifyingProvider finishes its turn immediately
     await conn._dispatch({"action": Action.SESSION_START, "session_id": "prov-1", "prompt": "hi"})
     await asyncio.sleep(0.01)
+    assert conn.sessions["real-sdk-id"].status == "idle"
+    monkeypatch.setattr(
+        history,
+        "list_sessions",
+        lambda limit=200: [{"provider": "claude", "session_id": "real-sdk-id"}],
+    )
+    await conn._dispatch({"action": Action.HISTORY_LIST})
+    snapshot = next(
+        m["payload"] for m in conn._ws.sent if m["payload"].get("event") == Event.HISTORY_SNAPSHOT
+    )
+    assert snapshot["sessions"][0]["running"] is False
+
+
+async def test_history_list_flags_only_actively_running_session(monkeypatch):
+    """Only a session executing a turn right now is flagged running."""
+    from coding_bridge_agent import history
+
+    gate = asyncio.Event()
+
+    class HangingProvider(FakeProvider):
+        async def start(self, prompt, **kwargs):
+            await super().start(prompt, **kwargs)
+            await gate.wait()  # hold the turn open so status stays "running"
+
+    settings = Settings(bridge_url="https://bridge.test", permission_timeout=0.2)
+    conn = BridgeConnection(
+        settings, "node_tok", provider_factory=lambda p, s, e, a: HangingProvider(p, s, e, a)
+    )
+    conn._ws = FakeWS()
+    await conn._dispatch({"action": Action.SESSION_START, "session_id": "live-1", "prompt": "go"})
+    await asyncio.sleep(0.01)
+    assert conn.sessions["live-1"].status == "running"
     monkeypatch.setattr(
         history,
         "list_sessions",
         lambda limit=200: [
-            {"provider": "claude", "session_id": "real-sdk-id"},
+            {"provider": "claude", "session_id": "live-1"},
             {"provider": "claude", "session_id": "other"},
         ],
     )
@@ -469,5 +504,7 @@ async def test_history_list_marks_live_sessions_running(monkeypatch):
         m["payload"] for m in conn._ws.sent if m["payload"].get("event") == Event.HISTORY_SNAPSHOT
     )
     by_id = {s["session_id"]: s["running"] for s in snapshot["sessions"]}
-    assert by_id == {"real-sdk-id": True, "other": False}
+    assert by_id == {"live-1": True, "other": False}
+    gate.set()  # let the hung turn finish so the test tears down cleanly
+    await asyncio.sleep(0.01)
 

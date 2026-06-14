@@ -394,6 +394,31 @@ async def test_dispatch_history_get_emits_detail(monkeypatch):
     assert details[0]["session_id"] == "sid-claude"
 
 
+async def test_dispatch_history_get_folds_in_sidecar(monkeypatch, tmp_path):
+    from coding_bridge_agent import session_meta
+
+    # Transcript carries cwd/model but not effort/permission_mode.
+    monkeypatch.setattr(
+        history,
+        "read_session",
+        lambda provider, session_id: {
+            "provider": provider, "events": [], "title": "t", "cwd": "/repo", "model": "opus"
+        },
+    )
+    settings = Settings(bridge_url="https://bridge.test", config_dir=tmp_path)
+    conn = BridgeConnection(settings, "node_tok")
+    conn._ws = _FakeWS()
+    session_meta.save(tmp_path, "sid-claude", permission_mode="plan", effort="high")
+    await conn._dispatch(
+        {"action": Action.HISTORY_GET, "provider": "claude", "session_id": "sid-claude"}
+    )
+    detail = _payloads(conn, Event.HISTORY_DETAIL)[0]
+    assert detail["permission_mode"] == "plan"
+    assert detail["effort"] == "high"
+    assert detail["cwd"] == "/repo"  # transcript stays authoritative
+    assert detail["model"] == "opus"
+
+
 async def test_dispatch_history_get_requires_params():
     conn = _new_conn()
     await conn._dispatch({"action": Action.HISTORY_GET})

@@ -108,6 +108,81 @@ async def test_generic_error_surfaces_without_reset_or_retry():
     assert err[0]["exit_code"] is None
 
 
+async def test_started_event_carries_effort_and_permission_mode():
+    settings = Settings(turn_retry_backoff=0.0)
+    events: list[dict] = []
+
+    async def emit(payload):
+        events.append(payload)
+
+    async def ask(*_a):
+        return "deny"
+
+    def factory(_name, _sid, emit_fn, _ask):
+        class _P:
+            name = "fake"
+
+            async def start(self, prompt, **_kw):
+                return None
+
+            async def aclose(self):
+                return None
+
+        return _P()
+
+    sess = Session(
+        "s1", factory, emit, settings,
+        cwd="/tmp", model="m", permission_mode="plan", provider="fake", effort="high",
+    )
+    await sess.start("hi")
+    await sess._task
+    started = [e for e in events if e.get("event") == Event.SESSION_STARTED]
+    assert started and started[0]["permission_mode"] == "plan"
+    assert started[0]["effort"] == "high"
+    info = sess.info()
+    assert info["permission_mode"] == "plan" and info["effort"] == "high"
+
+
+async def test_result_with_sdk_session_id_persists_settings(tmp_path):
+    from coding_bridge_agent import session_meta
+
+    settings = Settings(turn_retry_backoff=0.0, config_dir=tmp_path)
+
+    async def emit(payload):
+        return None
+
+    def factory(_name, _sid, emit_fn, _ask):
+        class _P:
+            name = "fake"
+
+            async def start(self, prompt, **_kw):
+                # A turn's result carries the on-disk transcript id.
+                await emit_fn(event_payload(Event.SESSION_RESULT, "s1", sdk_session_id="disk-9"))
+
+            async def aclose(self):
+                return None
+
+        return _P()
+
+    async def ask(*_a):
+        return "deny"
+
+    sess = Session(
+        "s1", factory, emit, settings,
+        cwd="/repo", model="opus", permission_mode="acceptEdits", provider="claude", effort="high",
+    )
+    await sess.start("hi")
+    await sess._task
+    saved = session_meta.load(tmp_path, "disk-9")
+    assert saved == {
+        "cwd": "/repo",
+        "model": "opus",
+        "permission_mode": "acceptEdits",
+        "effort": "high",
+        "provider": "claude",
+    }
+
+
 async def test_retry_limit_is_respected():
     sess, events, holder = _make(
         [_Crash(exit_code=3), _Crash(exit_code=3), _Crash(exit_code=3)],

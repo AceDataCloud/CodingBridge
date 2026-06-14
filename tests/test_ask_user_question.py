@@ -4,7 +4,6 @@ The wizard answers a multiple-choice prompt; the answer must ride the
 ``permission.resolve`` all the way into the claude tool input so the CLI echoes
 it back instead of reporting "The user did not answer the questions."
 """
-import asyncio
 
 import pytest
 

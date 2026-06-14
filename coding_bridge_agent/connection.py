@@ -14,7 +14,7 @@ from collections import deque
 
 import websockets
 
-from . import capabilities, fs, history, logs, protocol
+from . import capabilities, fs, history, logs, protocol, session_meta
 from .config import Settings
 from .protocol import Action, Event, event_payload
 from .providers import KNOWN_PROVIDERS, default_provider_factory
@@ -436,6 +436,18 @@ class BridgeConnection:
             )
             return
         detail = await asyncio.to_thread(history.read_session, provider, session_id)
+        # The transcript carries cwd/model but never effort/permission_mode — fold
+        # in the sidecar we saved while the session ran so a resume restores all of
+        # them. cwd/model stay transcript-authoritative; the sidecar only backfills.
+        meta = session_meta.load(self.settings.config_dir, session_id)
+        if meta.get("permission_mode"):
+            detail["permission_mode"] = meta["permission_mode"]
+        if meta.get("effort"):
+            detail["effort"] = meta["effort"]
+        if not detail.get("cwd") and meta.get("cwd"):
+            detail["cwd"] = meta["cwd"]
+        if not detail.get("model") and meta.get("model"):
+            detail["model"] = meta["model"]
         await self.send_payload(event_payload(Event.HISTORY_DETAIL, session_id, **detail))
 
     async def _send_fs_list(self, payload: dict) -> None:

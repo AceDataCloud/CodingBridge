@@ -39,7 +39,14 @@ class BridgeConnection:
         self.settings = settings
         self.node_token = node_token
         self.provider_factory = provider_factory or default_provider_factory(settings)
+        # Live sessions, keyed by their canonical id. A session opens under the
+        # provisional id the browser minted, then is re-keyed to the provider's
+        # real (SDK/transcript) id once known, so a resume-from-history reattaches
+        # to it instead of spawning a parallel client. `_aliases` maps the old
+        # provisional id to the real one for the brief window a command addressed
+        # to the provisional id may still arrive.
         self.sessions: dict[str, Session] = {}
+        self._aliases: dict[str, str] = {}
         self._ws: websockets.WebSocketClientProtocol | None = None
         self._stop = asyncio.Event()
         self._loop: asyncio.AbstractEventLoop | None = None
@@ -312,7 +319,10 @@ class BridgeConnection:
                 )
             )
             return
-        existing = self.sessions.get(session_id)
+        # Reattach when the session is already live (a resume of a session still
+        # running on this node, or a follow-up): continue it instead of spawning a
+        # second client over the same transcript.
+        existing = self._session(session_id)
         if existing is not None:
             existing.set_trace(payload.get("trace_id"))
             await existing.send(
@@ -334,18 +344,45 @@ class BridgeConnection:
             effort=payload.get("effort") or None,
             resume=payload.get("resume_session_id") or None,
             trace_id=payload.get("trace_id"),
+            on_rekey=self._rekey_session,
         )
         self.sessions[session_id] = session
         await session.start(
             payload.get("prompt", ""), payload.get("images"), payload.get("attachments")
         )
 
+    def _session(self, session_id: str | None) -> Session | None:
+        """Resolve a session by its canonical id or a still-live provisional alias."""
+        if not session_id:
+            return None
+        session = self.sessions.get(session_id)
+        if session is not None:
+            return session
+        alias = self._aliases.get(session_id)
+        return self.sessions.get(alias) if alias else None
+
+    def _rekey_session(self, old_id: str, new_id: str) -> None:
+        """Promote a live session from its provisional id to the real (SDK) id."""
+        if old_id == new_id:
+            return
+        session = self.sessions.pop(old_id, None)
+        if session is None:
+            return
+        established = self.sessions.get(new_id)
+        if established is not None and established is not session:
+            # A session already owns the real id; never run two clients for one
+            # transcript — close the just-promoted duplicate and keep the first.
+            self._schedule(session.close())
+            return
+        self.sessions[new_id] = session
+        self._aliases[old_id] = new_id
+
     async def _send_to_session(
         self,
         session_id: str | None,
         payload: dict,
     ) -> None:
-        session = self.sessions.get(session_id) if session_id else None
+        session = self._session(session_id)
         if session is None:
             await self.send_payload(
                 event_payload(Event.SESSION_ERROR, session_id, message="unknown session")
@@ -360,7 +397,7 @@ class BridgeConnection:
         )
 
     async def _edit_session(self, session_id: str | None, payload: dict) -> None:
-        session = self.sessions.get(session_id) if session_id else None
+        session = self._session(session_id)
         if session is None:
             await self.send_payload(
                 event_payload(Event.SESSION_ERROR, session_id, message="unknown session")
@@ -377,14 +414,20 @@ class BridgeConnection:
         )
 
     async def _interrupt_session(self, session_id: str | None) -> None:
-        session = self.sessions.get(session_id) if session_id else None
+        session = self._session(session_id)
         if session is not None:
             await session.interrupt()
 
     async def _close_session(self, session_id: str | None) -> None:
-        session = self.sessions.pop(session_id, None) if session_id else None
-        if session is not None:
-            await session.close()
+        session = self._session(session_id)
+        if session is None:
+            return
+        # Drop by the canonical id plus any provisional alias pointing at it.
+        self.sessions.pop(session.session_id, None)
+        for alias, target in list(self._aliases.items()):
+            if target == session.session_id or alias == session_id:
+                self._aliases.pop(alias, None)
+        await session.close()
 
     def _resolve_permission(self, payload: dict) -> None:
         request_id = payload.get("request_id")
@@ -423,6 +466,12 @@ class BridgeConnection:
     async def _send_history_list(self, payload: dict) -> None:
         limit = payload.get("limit") or 200
         sessions = await asyncio.to_thread(history.list_sessions, limit)
+        # Flag transcripts that are a session live on this node right now, so the
+        # browser reattaches (keeping its running/streaming state) instead of
+        # replaying a static copy.
+        live = set(self.sessions.keys())
+        for summary in sessions:
+            summary["running"] = summary.get("session_id") in live
         await self.send_payload(event_payload(Event.HISTORY_SNAPSHOT, sessions=sessions))
 
     async def _send_history_detail(self, payload: dict) -> None:

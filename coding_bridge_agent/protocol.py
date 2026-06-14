@@ -75,6 +75,11 @@ class Event:
     """Node → browser events (inside ``payload``)."""
 
     SESSION_STARTED = "session.started"
+    # The provider's real (SDK/CLI) session id is now known. Carries the OLD
+    # session_id the browser opened with plus `sdk_session_id` (the canonical id,
+    # == the on-disk transcript id). The node registry and the browser both
+    # re-key to it, so a live session and its history entry share one identity.
+    SESSION_IDENTIFIED = "session.identified"
     SESSION_TEXT = "session.text"
     SESSION_TEXT_DELTA = "session.text_delta"
     SESSION_THINKING = "session.thinking"

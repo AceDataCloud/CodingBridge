@@ -74,6 +74,8 @@ class CodexProvider:
         self._thread_id: str | None = None
         self._last_error: str | None = None
         self._proc: asyncio.subprocess.Process | None = None
+        # Announced the real (thread) id to the browser yet? See claude.py.
+        self._announced_identity = False
 
     async def start(
         self,
@@ -273,11 +275,31 @@ class CodexProvider:
                 tail.append(raw.decode("utf-8", "replace").rstrip())
                 del tail[:-20]
 
+    async def _maybe_announce_identity(self) -> None:
+        """Adopt the codex thread id as this session's canonical id, once known.
+
+        Mirrors the Claude provider: the browser opens under a provisional id,
+        codex assigns the real thread id at ``thread.started``; we emit
+        session.identified and re-tag later events so live + history share one id.
+        """
+        if self._announced_identity:
+            return
+        sid = self._thread_id
+        if not sid:
+            return
+        self._announced_identity = True
+        if sid == self._session_id:
+            return
+        old = self._session_id
+        await self._emit(event_payload(Event.SESSION_IDENTIFIED, old, sdk_session_id=sid))
+        self._session_id = sid
+
     async def _handle_event(self, obj: dict[str, Any]) -> bool:
         """Map one codex JSONL event; returns True when it ends a turn."""
         kind = obj.get("type")
         if kind == "thread.started":
             self._thread_id = obj.get("thread_id") or self._thread_id
+            await self._maybe_announce_identity()
         elif kind in ("item.started", "item.updated", "item.completed"):
             await self._handle_item(kind, obj.get("item") or {})
         elif kind == "turn.completed":
@@ -288,6 +310,7 @@ class CodexProvider:
                     subtype="turn_complete",
                     is_error=False,
                     usage=obj.get("usage"),
+                    sdk_session_id=self._thread_id,
                 )
             )
             return True

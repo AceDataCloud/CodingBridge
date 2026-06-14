@@ -27,7 +27,26 @@ async def test_thread_started_captures_id():
     provider, events = _provider()
     await provider._handle_event({"type": "thread.started", "thread_id": "abc-123"})
     assert provider._thread_id == "abc-123"
+    # The real thread id is announced so the node/browser re-key to it, then
+    # subsequent events carry it as the canonical session id.
+    assert events == [
+        {"event": Event.SESSION_IDENTIFIED, "session_id": "s1", "sdk_session_id": "abc-123"}
+    ]
+    assert provider._session_id == "abc-123"
+
+
+async def test_thread_started_no_identity_when_id_matches():
+    """Resuming opens under the real id already, so no rename is announced."""
+    settings = Settings(bridge_url="https://bridge.test", default_cwd="/work")
+    events: list[dict] = []
+
+    async def emit(payload):
+        events.append(payload)
+
+    provider = CodexProvider("abc-123", emit, lambda *a: "deny", settings)
+    await provider._handle_event({"type": "thread.started", "thread_id": "abc-123"})
     assert events == []
+    assert provider._session_id == "abc-123"
 
 
 async def test_agent_message_completed_emits_text():

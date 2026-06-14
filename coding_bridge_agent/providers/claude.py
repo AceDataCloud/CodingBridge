@@ -65,6 +65,9 @@ class ClaudeProvider:
         # browser can fork the conversation here when a prompt is edited.
         self._sdk_session_id: str | None = None
         self._last_msg_uuid: str | None = None
+        # Announced the real id to the browser yet? Once known we re-tag events
+        # with it and emit session.identified so the registry/browser re-key.
+        self._announced_identity = False
         # Resume-replay guard (first resumed turn only); see _gated_receive.
         self._gate_active = False
         self._gate_uuids: set[str] = set()
@@ -374,6 +377,7 @@ class ClaudeProvider:
 
     async def _handle_message(self, message: Any) -> None:
         self._note_ids(message)
+        await self._maybe_announce_identity()
         stream_event = getattr(message, "event", None)
         if isinstance(stream_event, dict):
             await self._handle_stream_event(stream_event)
@@ -420,6 +424,29 @@ class ClaudeProvider:
             uid = getattr(message, "uuid", None)
             if isinstance(uid, str) and uid:
                 self._last_msg_uuid = uid
+
+    async def _maybe_announce_identity(self) -> None:
+        """Adopt the SDK session id as this session's canonical id, once known.
+
+        The browser opens a session under a provisional id; the SDK assigns the
+        real (on-disk transcript) id during the first turn. The moment we see it
+        we emit session.identified and re-tag every later event with it, so the
+        live session and its history entry share one identity. A resume already
+        opens under the real id, so the guard below makes this a no-op there.
+        """
+        if self._announced_identity:
+            return
+        sid = self._sdk_session_id
+        if not sid:
+            return
+        self._announced_identity = True
+        if sid == self._session_id:
+            return
+        old = self._session_id
+        # Emit under the OLD id so the browser knows which entry to re-key, then
+        # switch so all subsequent events carry the canonical id.
+        await self._emit(event_payload(Event.SESSION_IDENTIFIED, old, sdk_session_id=sid))
+        self._session_id = sid
 
     async def _emit_status(self) -> None:
         """Synthesize a `/status` answer from the cached initialize info + session."""

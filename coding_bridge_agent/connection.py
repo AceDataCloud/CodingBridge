@@ -466,12 +466,14 @@ class BridgeConnection:
     async def _send_history_list(self, payload: dict) -> None:
         limit = payload.get("limit") or 200
         sessions = await asyncio.to_thread(history.list_sessions, limit)
-        # Flag transcripts that are a session live on this node right now, so the
-        # browser reattaches (keeping its running/streaming state) instead of
-        # replaying a static copy.
-        live = set(self.sessions.keys())
+        # Flag transcripts whose session is actively executing a turn right now, so
+        # the drawer shows a live indicator only for those. A completed session
+        # stays in the registry (it's still reattachable), but it is idle, not
+        # running, so it must not be flagged — that's what made every in-memory
+        # session look "running". Reattach keys off registry membership separately.
+        running = {sid for sid, s in self.sessions.items() if s.status == "running"}
         for summary in sessions:
-            summary["running"] = summary.get("session_id") in live
+            summary["running"] = summary.get("session_id") in running
         await self.send_payload(event_payload(Event.HISTORY_SNAPSHOT, sessions=sessions))
 
     async def _send_history_detail(self, payload: dict) -> None:

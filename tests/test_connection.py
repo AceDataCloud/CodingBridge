@@ -127,7 +127,31 @@ async def test_permission_resolve_routes_to_session():
     conn._resolve_permission(
         {"action": Action.PERMISSION_RESOLVE, "request_id": request_id, "decision": "allow"}
     )
-    assert await pending == "allow"
+    assert (await pending).decision == "allow"
+
+
+async def test_permission_resolve_forwards_ask_user_question_answer():
+    conn = _new_conn()
+    await conn._dispatch({"action": Action.SESSION_START, "session_id": "s1", "prompt": "x"})
+    session = conn.sessions["s1"]
+
+    pending = asyncio.create_task(
+        session._ask_permission("AskUserQuestion", {"questions": [{"question": "Q1"}]}, {})
+    )
+    await asyncio.sleep(0)
+    request_id = next(
+        m["payload"]["request_id"]
+        for m in conn._ws.sent
+        if m["payload"].get("event") == Event.PERMISSION_REQUEST
+    )
+
+    answer = {"answers": {"Q1": "A"}}
+    conn._resolve_permission(
+        {"request_id": request_id, "decision": "allow", "answer": answer}
+    )
+    resolution = await pending
+    assert resolution.decision == "allow"
+    assert resolution.answer == answer
 
 
 async def test_permissions_list_replays_pending_requests():
@@ -153,7 +177,7 @@ async def test_permissions_list_replays_pending_requests():
 
     # Resolving still works and clears the pending set.
     conn._resolve_permission({"request_id": requests[0]["request_id"], "decision": "allow"})
-    assert await pending == "allow"
+    assert (await pending).decision == "allow"
     assert session.pending_permissions() == []
 
 

@@ -7,14 +7,30 @@ that turns a local agent prompt into a remote approval.
 from __future__ import annotations
 
 import asyncio
-from typing import Literal
+from dataclasses import dataclass
+from typing import Any, Literal
 
 Decision = Literal["allow", "deny"]
 
 
+@dataclass(frozen=True)
+class Resolution:
+    """How a parked ``can_use_tool`` request was settled.
+
+    ``decision`` is the allow/deny verdict. ``answer`` carries the structured
+    reply for interactive tools — ``AskUserQuestion`` ships
+    ``{"answers": {<question>: <label | label[]>}, "response"?: str}`` — and is
+    ``None`` for an ordinary allow/deny gate. It is only ever populated on an
+    ``allow``; a deny never carries an answer.
+    """
+
+    decision: Decision
+    answer: dict[str, Any] | None = None
+
+
 class PermissionBroker:
     def __init__(self) -> None:
-        self._pending: dict[str, asyncio.Future[Decision]] = {}
+        self._pending: dict[str, asyncio.Future[Resolution]] = {}
         # The request descriptor (tool/title/input…) kept alive for the life of
         # the future, so a browser that (re)connects after the prompt was raised
         # can re-render the dialog from a snapshot instead of missing it.
@@ -29,14 +45,14 @@ class PermissionBroker:
 
     async def request(
         self, request_id: str, timeout: float | None = None, detail: dict | None = None
-    ) -> Decision:
+    ) -> Resolution:
         """Block until the request is resolved; deny on timeout.
 
         ``detail`` is the request descriptor surfaced via :meth:`pending_details`
         so a late-joining browser can rebuild the approval prompt.
         """
         loop = asyncio.get_running_loop()
-        future: asyncio.Future[Decision] = loop.create_future()
+        future: asyncio.Future[Resolution] = loop.create_future()
         self._pending[request_id] = future
         if detail is not None:
             self._details[request_id] = detail
@@ -45,21 +61,26 @@ class PermissionBroker:
                 return await asyncio.wait_for(future, timeout)
             return await future
         except (TimeoutError, asyncio.TimeoutError):
-            return "deny"
+            return Resolution("deny")
         finally:
             self._pending.pop(request_id, None)
             self._details.pop(request_id, None)
 
-    def resolve(self, request_id: str, decision: Decision) -> bool:
+    def resolve(
+        self, request_id: str, decision: str, answer: dict[str, Any] | None = None
+    ) -> bool:
         future = self._pending.get(request_id)
         if future is None or future.done():
             return False
-        future.set_result("allow" if decision == "allow" else "deny")
+        verdict: Decision = "allow" if decision == "allow" else "deny"
+        # An answer only rides an allow; a deny is always answer-less.
+        future.set_result(Resolution(verdict, answer if verdict == "allow" else None))
         return True
 
     def cancel_all(self, decision: Decision = "deny") -> None:
+        verdict: Decision = "allow" if decision == "allow" else "deny"
         for future in list(self._pending.values()):
             if not future.done():
-                future.set_result(decision)
+                future.set_result(Resolution(verdict))
         self._pending.clear()
         self._details.clear()

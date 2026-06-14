@@ -18,6 +18,30 @@ def _default_node_name() -> str:
         return "node"
 
 
+def _safe_default_cwd() -> str:
+    """A sane default working directory.
+
+    Normally the directory the daemon was launched from. But when it runs as a
+    Windows service / from an OS launcher, ``os.getcwd()`` is ``C:\\Windows\\System32``
+    — never a place to run code in. Fall back to the user's home in that case so a
+    session that arrives without an explicit cwd (e.g. resumed-from-history when the
+    transcript carried no cwd) doesn't silently land in System32.
+    """
+    try:
+        cwd = Path(os.getcwd()).resolve()
+    except OSError:
+        return str(Path.home())
+    system_root = os.environ.get("SYSTEMROOT") or os.environ.get("WINDIR")
+    if system_root:
+        try:
+            sys_dir = Path(system_root).resolve()
+            if cwd == sys_dir or sys_dir in cwd.parents:
+                return str(Path.home())
+        except OSError:
+            pass
+    return str(cwd)
+
+
 @dataclass
 class Settings:
     """All tunables, sourced from env or CLI flags."""
@@ -44,7 +68,7 @@ class Settings:
         if not self.node_name:
             self.node_name = _default_node_name()
         if not self.default_cwd:
-            self.default_cwd = os.getcwd()
+            self.default_cwd = _safe_default_cwd()
         self.config_dir = Path(self.config_dir).expanduser()
         if self.log_dir is None:
             self.log_dir = self.config_dir / "logs"

@@ -8,6 +8,7 @@ import uuid
 from collections.abc import Awaitable, Callable
 from typing import Any
 
+from . import session_meta
 from .permissions import PermissionBroker, Resolution
 from .protocol import Event, event_payload
 from .providers.base import AskPermissionFn, EmitFn, ProviderFactory
@@ -93,9 +94,30 @@ class Session:
     async def _emit(self, payload: dict[str, Any]) -> None:
         """Stamp the active trace id onto every outgoing event, then forward."""
         self._turn_emitted = True
+        # The on-disk (SDK) session id rides every result. The moment we know it,
+        # persist the settings the transcript can't carry (effort / permission
+        # mode) keyed by that id, so a later resume-from-history restores them.
+        sdk_sid = payload.get("sdk_session_id")
+        if isinstance(sdk_sid, str) and sdk_sid:
+            self._remember_settings(sdk_sid)
         if self.trace_id and "trace_id" not in payload:
             payload = {**payload, "trace_id": self.trace_id}
         await self._raw_emit(payload)
+
+    def _remember_settings(self, sdk_session_id: str) -> None:
+        config_dir = getattr(self._settings, "config_dir", None)
+        if not config_dir:
+            return
+        with contextlib.suppress(Exception):
+            session_meta.save(
+                config_dir,
+                sdk_session_id,
+                provider=self.provider,
+                cwd=self.cwd,
+                model=self.model,
+                permission_mode=self.permission_mode,
+                effort=self.effort,
+            )
 
     async def _ask_permission(
         self, tool_name: str, input_data: dict[str, Any], ctx: dict[str, Any]
@@ -136,6 +158,8 @@ class Session:
                 cwd=self.cwd,
                 model=self.model,
                 provider=self.provider,
+                permission_mode=self.permission_mode,
+                effort=self.effort,
             )
         )
         self._spawn(
@@ -318,4 +342,6 @@ class Session:
             "provider": self.provider,
             "cwd": self.cwd,
             "model": self.model,
+            "permission_mode": self.permission_mode,
+            "effort": self.effort,
         }

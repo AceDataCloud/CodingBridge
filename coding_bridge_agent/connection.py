@@ -391,8 +391,13 @@ class BridgeConnection:
         decision = "allow" if payload.get("decision") == "allow" else "deny"
         if not request_id:
             return
+        # AskUserQuestion carries the user's structured selection alongside the
+        # allow, so the provider can feed it back to the agent as the tool result
+        # instead of leaving the question unanswered.
+        answer = payload.get("answer")
+        answer = answer if isinstance(answer, dict) else None
         for session in self.sessions.values():
-            if session.resolve_permission(request_id, decision):
+            if session.resolve_permission(request_id, decision, answer):
                 break
 
     async def _send_snapshot(self) -> None:

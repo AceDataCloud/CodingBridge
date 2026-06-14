@@ -8,7 +8,7 @@ import uuid
 from collections.abc import Awaitable, Callable
 from typing import Any
 
-from .permissions import PermissionBroker
+from .permissions import PermissionBroker, Resolution
 from .protocol import Event, event_payload
 from .providers.base import AskPermissionFn, EmitFn, ProviderFactory
 
@@ -99,7 +99,7 @@ class Session:
 
     async def _ask_permission(
         self, tool_name: str, input_data: dict[str, Any], ctx: dict[str, Any]
-    ) -> str:
+    ) -> Resolution:
         request_id = uuid.uuid4().hex
         # The descriptor the browser renders. Kept by the broker for the life of
         # the prompt so a reconnecting browser can rebuild it from a snapshot.
@@ -117,8 +117,10 @@ class Session:
             request_id, self._settings.permission_timeout, detail=detail
         )
 
-    def resolve_permission(self, request_id: str, decision: str) -> bool:
-        return self._broker.resolve(request_id, "allow" if decision == "allow" else "deny")
+    def resolve_permission(
+        self, request_id: str, decision: str, answer: dict[str, Any] | None = None
+    ) -> bool:
+        return self._broker.resolve(request_id, decision, answer)
 
     def pending_permissions(self) -> list[dict[str, Any]]:
         """Descriptors of this session's still-unresolved permission requests."""

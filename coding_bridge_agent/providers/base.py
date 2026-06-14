@@ -2,7 +2,10 @@
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
+
+if TYPE_CHECKING:
+    from ..permissions import Resolution
 
 
 def slash_name(prompt: str) -> str | None:
@@ -23,8 +26,10 @@ def slash_name(prompt: str) -> str | None:
 
 # Sends an inner event payload toward the browser.
 EmitFn = Callable[[dict[str, Any]], Awaitable[None]]
-# (tool_name, tool_input, context) -> "allow" | "deny".
-AskPermissionFn = Callable[[str, dict[str, Any], dict[str, Any]], Awaitable[str]]
+# (tool_name, tool_input, context) -> Resolution(decision, answer). The answer
+# is the structured reply for interactive tools (AskUserQuestion); None for a
+# plain allow/deny gate.
+AskPermissionFn = Callable[[str, dict[str, Any], dict[str, Any]], Awaitable["Resolution"]]
 
 
 class Provider(Protocol):

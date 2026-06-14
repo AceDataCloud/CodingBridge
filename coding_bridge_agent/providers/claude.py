@@ -28,6 +28,11 @@ logger = logging.getLogger("coding-bridge-agent.claude")
 # Phrase the claude CLI returns for TUI-only commands it can't run headlessly.
 _UNAVAILABLE_SUFFIX = "isn't available in this environment."
 
+# Claude Code's interactive multiple-choice tool. Unlike an ordinary gate, the
+# user supplies an answer, not just allow/deny — we feed it back via the tool
+# input so the CLI's own `call` echoes it as the tool result.
+ASK_USER_QUESTION_TOOL = "AskUserQuestion"
+
 
 class ClaudeProvider:
     name = "claude"
@@ -558,10 +563,21 @@ class ClaudeProvider:
             "display_name": getattr(context, "display_name", None),
             "description": getattr(context, "description", None),
         }
-        decision = await self._ask(tool_name, dict(input_data or {}), ctx)
-        if decision == "allow":
-            return PermissionResultAllow()
-        return PermissionResultDeny(message="Denied by user via Coding Bridge")
+        resolution = await self._ask(tool_name, dict(input_data or {}), ctx)
+        if resolution.decision != "allow":
+            return PermissionResultDeny(message="Denied by user via Coding Bridge")
+        # AskUserQuestion is answered, not merely allowed: merge the user's
+        # selection into the tool input so the CLI's `call` returns it as the
+        # tool result instead of "The user did not answer the questions."
+        if tool_name == ASK_USER_QUESTION_TOOL and resolution.answer:
+            answers = _ask_user_question_answers(resolution.answer)
+            if answers:
+                updated = {**(input_data or {}), "answers": answers}
+                response = resolution.answer.get("response")
+                if isinstance(response, str) and response.strip():
+                    updated["response"] = response
+                return PermissionResultAllow(updated_input=updated)
+        return PermissionResultAllow()
 
     async def interrupt(self) -> None:
         if self._client and self._connected:
@@ -574,6 +590,28 @@ class ClaudeProvider:
                 await self._client.disconnect()
         self._connected = False
         self._client = None
+
+
+def _ask_user_question_answers(answer: dict[str, Any]) -> dict[str, str]:
+    """Normalize the browser's AskUserQuestion reply to the CLI's answer shape.
+
+    The wizard sends ``{"answers": {<question>: <label | label[]>}}``; the claude
+    tool's input wants ``answers`` as ``{<question>: <string>}`` with multi-select
+    choices comma-joined (its output schema types answers as string→string).
+    Blank/empty selections are dropped so they don't read as a real choice.
+    """
+    raw = answer.get("answers")
+    if not isinstance(raw, dict):
+        return {}
+    out: dict[str, str] = {}
+    for question, value in raw.items():
+        if isinstance(value, list):
+            joined = ", ".join(str(v) for v in value if str(v).strip())
+            if joined:
+                out[str(question)] = joined
+        elif value is not None and str(value).strip():
+            out[str(question)] = str(value)
+    return out
 
 
 def _stringify(content: Any) -> Any:

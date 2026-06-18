@@ -12,9 +12,50 @@ def test_describe_marks_availability_from_which(monkeypatch):
     monkeypatch.setattr(capabilities.shutil, "which", lambda cli: "/usr/bin/" + cli)
     desc = capabilities.describe()
     assert all(p["available"] for p in desc["providers"])
+    # Not on PATH and not in any known install dir → genuinely unavailable.
     monkeypatch.setattr(capabilities.shutil, "which", lambda cli: None)
+    monkeypatch.setattr(capabilities, "_candidate_cli_paths", lambda cli: [])
     desc = capabilities.describe()
     assert all(not p["available"] for p in desc["providers"])
+
+
+def test_resolve_cli_prefers_settings_override(monkeypatch, tmp_path):
+    binary = tmp_path / "claude"
+    binary.write_text("#!/bin/sh\n")
+    binary.chmod(0o755)
+    monkeypatch.setattr(capabilities.shutil, "which", lambda cli: None)
+    settings = Settings(claude_path=str(binary))
+    assert capabilities.resolve_cli("claude", settings) == str(binary)
+
+
+def test_resolve_cli_falls_back_to_known_dirs_when_path_misses(monkeypatch, tmp_path):
+    # Simulate the nvm case: not on PATH, but present in a known install dir.
+    binary = tmp_path / "claude"
+    binary.write_text("#!/bin/sh\n")
+    binary.chmod(0o755)
+    monkeypatch.setattr(capabilities.shutil, "which", lambda cli: None)
+    monkeypatch.setattr(capabilities, "_candidate_cli_paths", lambda cli: [str(binary)])
+    assert capabilities.resolve_cli("claude") == str(binary)
+    # A non-existent candidate resolves to None (the binary really is absent).
+    monkeypatch.setattr(capabilities, "_candidate_cli_paths", lambda cli: [str(tmp_path / "nope")])
+    assert capabilities.resolve_cli("codex") is None
+
+
+def test_ensure_clis_on_path_prepends_resolved_dir(monkeypatch, tmp_path):
+    bindir = tmp_path / "node" / "bin"
+    bindir.mkdir(parents=True)
+    claude = bindir / "claude"
+    claude.write_text("#!/bin/sh\n")
+    claude.chmod(0o755)
+    monkeypatch.setenv("PATH", "/usr/bin")
+    monkeypatch.setattr(
+        capabilities,
+        "resolve_cli",
+        lambda cli, settings=None: str(claude) if cli == "claude" else None,
+    )
+    added = capabilities.ensure_clis_on_path(Settings())
+    assert str(bindir) in added
+    assert capabilities.os.environ["PATH"].split(":")[0] == str(bindir)
 
 
 def test_claude_has_max_effort_codex_does_not():

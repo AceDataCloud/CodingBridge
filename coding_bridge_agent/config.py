@@ -60,6 +60,10 @@ class Settings:
     outbox_max: int = 5000  # max buffered node→browser events while disconnected
     default_cwd: str = ""
     default_model: str | None = None
+    # Explicit paths to the provider CLIs, for nodes whose daemon PATH can't see
+    # them (nvm/volta/.local installs). Empty → auto-resolve (PATH + known dirs).
+    claude_path: str | None = None
+    codex_path: str | None = None
     claim_url_template: str = DEFAULT_CLAIM_URL
     log_level: str = "INFO"
     log_dir: Path | None = None
@@ -116,6 +120,8 @@ class Settings:
             turn_retry_backoff=_f("CODING_BRIDGE_TURN_RETRY_BACKOFF", 0.5),
             outbox_max=int(_f("CODING_BRIDGE_OUTBOX_MAX", 5000)),
             default_model=os.environ.get("CODING_BRIDGE_MODEL") or None,
+            claude_path=os.environ.get("CODING_BRIDGE_CLAUDE_PATH") or None,
+            codex_path=os.environ.get("CODING_BRIDGE_CODEX_PATH") or None,
             claim_url_template=os.environ.get("CODING_BRIDGE_CLAIM_URL", DEFAULT_CLAIM_URL),
             log_level=os.environ.get("CODING_BRIDGE_LOG_LEVEL", "INFO"),
             log_dir=(

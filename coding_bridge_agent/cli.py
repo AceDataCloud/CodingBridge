@@ -7,7 +7,7 @@ import logging
 import sys
 from pathlib import Path
 
-from . import logs, store
+from . import capabilities, logs, store
 from .config import Settings
 from .connection import BridgeConnection
 from .locking import AlreadyRunning, SingleInstance
@@ -25,6 +25,10 @@ def _build_settings(args: argparse.Namespace) -> Settings:
         settings.log_dir = settings.config_dir / "logs"
     if getattr(args, "model", None):
         settings.default_model = args.model
+    if getattr(args, "claude_path", None):
+        settings.claude_path = args.claude_path
+    if getattr(args, "codex_path", None):
+        settings.codex_path = args.codex_path
     if getattr(args, "cwd", None):
         settings.default_cwd = args.cwd
     if getattr(args, "permission_timeout", None) is not None:
@@ -90,6 +94,12 @@ async def _run_connection(settings: Settings, token: str) -> None:
             file=sys.stderr,
         )
         raise SystemExit(1) from None
+    # A daemon launched outside the user's login shell (no nvm/volta/.local on
+    # PATH) can't see `claude`/`codex` even when installed; surface the resolved
+    # dirs onto PATH so the SDK and `codex exec` actually find them.
+    added = capabilities.ensure_clis_on_path(settings)
+    if added:
+        logging.getLogger(logs.ROOT_LOGGER).info("added to PATH for CLI discovery: %s", added)
     connection = BridgeConnection(settings, token)
     print(f"  Coding Bridge agent running. Node: {settings.node_name}. Press Ctrl-C to stop.")
     try:
@@ -154,6 +164,16 @@ def cmd_status(args: argparse.Namespace) -> None:
 def _add_run_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--model", help="Default Claude model for new sessions")
     parser.add_argument("--cwd", help="Default working directory for new sessions")
+    parser.add_argument(
+        "--claude-path",
+        dest="claude_path",
+        help="Path to the claude CLI (when PATH can't find it, e.g. nvm installs)",
+    )
+    parser.add_argument(
+        "--codex-path",
+        dest="codex_path",
+        help="Path to the codex CLI (when PATH can't find it)",
+    )
     parser.add_argument(
         "--permission-timeout",
         type=float,

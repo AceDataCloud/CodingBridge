@@ -65,7 +65,9 @@ class BridgeConnection:
 
     def capabilities(self) -> list[str]:
         # Reflect the providers whose CLI is actually installed, plus history.
-        providers = [p["name"] for p in capabilities.describe()["providers"] if p["available"]]
+        providers = [
+            p["name"] for p in capabilities.describe(self.settings)["providers"] if p["available"]
+        ]
         return [*providers, "history"]
 
     def stop(self) -> None:

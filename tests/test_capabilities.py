@@ -1,5 +1,5 @@
-from coding_bridge_agent import capabilities
-from coding_bridge_agent.config import Settings
+from coding_bridge import capabilities
+from coding_bridge.config import Settings
 
 
 def test_describe_lists_both_providers():

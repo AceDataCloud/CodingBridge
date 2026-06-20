@@ -3,10 +3,10 @@ the unacked tail on reconnect, so nothing is lost across a relay drop.
 """
 import json
 
-from coding_bridge_agent import protocol
-from coding_bridge_agent.config import Settings
-from coding_bridge_agent.connection import BridgeConnection
-from coding_bridge_agent.protocol import Event, event_payload
+from coding_bridge import protocol
+from coding_bridge.config import Settings
+from coding_bridge.connection import BridgeConnection
+from coding_bridge.protocol import Event, event_payload
 
 
 class FakeWS:

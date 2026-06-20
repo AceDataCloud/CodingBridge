@@ -2,8 +2,8 @@ import httpx
 import pytest
 import respx
 
-from coding_bridge_agent.config import Settings
-from coding_bridge_agent.pairing import PairingError, poll_for_token, start_pairing
+from coding_bridge.config import Settings
+from coding_bridge.pairing import PairingError, poll_for_token, start_pairing
 
 
 @respx.mock

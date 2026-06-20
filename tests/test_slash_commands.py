@@ -1,8 +1,8 @@
 """Slash-command routing: detection plus per-provider handling."""
-from coding_bridge_agent.config import Settings
-from coding_bridge_agent.providers.base import slash_name
-from coding_bridge_agent.providers.claude import ClaudeProvider, _command_from_rejection
-from coding_bridge_agent.providers.codex import CodexProvider
+from coding_bridge.config import Settings
+from coding_bridge.providers.base import slash_name
+from coding_bridge.providers.claude import ClaudeProvider, _command_from_rejection
+from coding_bridge.providers.codex import CodexProvider
 
 
 def test_slash_name_extracts_command():

@@ -23,7 +23,7 @@ if TYPE_CHECKING:
     from ..config import Settings
     from .base import AskPermissionFn, EmitFn
 
-logger = logging.getLogger("coding-bridge-agent.claude")
+logger = logging.getLogger("coding-bridge.claude")
 
 # Phrase the claude CLI returns for TUI-only commands it can't run headlessly.
 _UNAVAILABLE_SUFFIX = "isn't available in this environment."

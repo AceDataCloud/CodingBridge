@@ -3,7 +3,7 @@
 Two sinks, no secrets (this runs on an end user's machine):
 
 * a rotating file at ``<config_dir>/logs/agent.log`` for local post-mortem, and
-* stderr for live ``coding-bridge-agent run`` output.
+* stderr for live ``coding-bridge run`` output.
 
 A third, *optional* sink — :class:`BridgeLogForwarder` — streams structured
 records up to the relay as ``node.log`` envelopes. The relay (which *does* hold
@@ -21,7 +21,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from collections.abc import Awaitable, Callable
 
-ROOT_LOGGER = "coding-bridge-agent"
+ROOT_LOGGER = "coding-bridge"
 
 _LOG_FORMAT = "%(asctime)s %(levelname)s %(name)s: %(message)s"
 

@@ -1,6 +1,6 @@
 import base64
 
-from coding_bridge_agent import images
+from coding_bridge import images
 
 # Minimal valid 1x1 PNG; content isn't validated, only base64-decodability.
 PNG_B64 = (

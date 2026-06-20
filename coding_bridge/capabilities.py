@@ -22,7 +22,7 @@ import shutil
 from pathlib import Path
 from typing import Any
 
-logger = logging.getLogger("coding-bridge-agent.capabilities")
+logger = logging.getLogger("coding-bridge.capabilities")
 
 # Per-provider model catalogs. Labels are proper nouns shown verbatim by the
 # browser; `value` is what we pass to the CLI. Update this list (or ship a new

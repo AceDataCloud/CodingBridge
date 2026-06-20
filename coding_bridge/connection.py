@@ -21,7 +21,7 @@ from .providers import KNOWN_PROVIDERS, default_provider_factory
 from .providers.base import ProviderFactory
 from .session import Session
 
-logger = logging.getLogger("coding-bridge-agent.connection")
+logger = logging.getLogger("coding-bridge.connection")
 
 
 class AuthFailed(Exception):
@@ -80,7 +80,7 @@ class BridgeConnection:
                 await self._connect_once()
                 delay = self.settings.reconnect_min
             except AuthFailed:
-                logger.error("node token rejected by bridge; re-run `coding-bridge-agent pair`")
+                logger.error("node token rejected by bridge; re-run `coding-bridge pair`")
                 return
             except asyncio.CancelledError:
                 raise

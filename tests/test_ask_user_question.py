@@ -7,8 +7,8 @@ it back instead of reporting "The user did not answer the questions."
 
 import pytest
 
-from coding_bridge_agent.permissions import Resolution
-from coding_bridge_agent.providers.claude import (
+from coding_bridge.permissions import Resolution
+from coding_bridge.providers.claude import (
     ClaudeProvider,
     _ask_user_question_answers,
 )

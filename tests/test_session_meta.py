@@ -1,5 +1,5 @@
 """Per-session settings sidecar: roundtrip, merge, and path-traversal guard."""
-from coding_bridge_agent import session_meta
+from coding_bridge import session_meta
 
 
 def test_save_then_load_roundtrip(tmp_path):

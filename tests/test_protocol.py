@@ -1,5 +1,5 @@
-from coding_bridge_agent import protocol
-from coding_bridge_agent.protocol import Event, envelope, event_payload
+from coding_bridge import protocol
+from coding_bridge.protocol import Event, envelope, event_payload
 
 
 def test_envelope_shape():

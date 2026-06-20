@@ -1,7 +1,7 @@
 """The single-instance lock prevents two daemons from fighting over one token."""
 import pytest
 
-from coding_bridge_agent.locking import AlreadyRunning, SingleInstance
+from coding_bridge.locking import AlreadyRunning, SingleInstance
 
 
 def test_second_acquire_is_rejected(tmp_path):

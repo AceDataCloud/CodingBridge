@@ -1,7 +1,7 @@
 import httpx
 import respx
 
-from coding_bridge_agent import attachments
+from coding_bridge import attachments
 
 
 @respx.mock

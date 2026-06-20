@@ -1,6 +1,6 @@
 """Single-instance lock so only one daemon runs per config dir.
 
-Two ``coding-bridge-agent up`` processes sharing one node token both connect to
+Two ``coding-bridge up`` processes sharing one node token both connect to
 the relay with the same identity; the relay keeps only the newest, so they
 supersede each other in a tight reconnect loop that tears down every in-flight
 turn. This is easy to hit by accident — e.g. an autostart task plus a manual run

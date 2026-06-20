@@ -1,9 +1,9 @@
 """Token-level streaming: Claude partial messages and codex typewriter parity."""
 
-from coding_bridge_agent.config import Settings
-from coding_bridge_agent.providers import codex
-from coding_bridge_agent.providers.claude import ClaudeProvider
-from coding_bridge_agent.providers.codex import CodexProvider
+from coding_bridge.config import Settings
+from coding_bridge.providers import codex
+from coding_bridge.providers.claude import ClaudeProvider
+from coding_bridge.providers.codex import CodexProvider
 
 
 def _capturing(cls):

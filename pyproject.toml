@@ -3,7 +3,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "coding-bridge-agent"
+name = "coding-bridge"
 version = "0.1.0"
 description = "Node daemon for AceDataCloud Coding Bridge — run Claude Code on your own machine and drive it from the web."
 readme = "README.md"
@@ -36,14 +36,14 @@ dev = [
 ]
 
 [project.scripts]
-coding-bridge-agent = "coding_bridge_agent.cli:main"
+coding-bridge = "coding_bridge.cli:main"
 
 [project.urls]
-Homepage = "https://github.com/AceDataCloud/CodingBridgeAgent"
-Issues = "https://github.com/AceDataCloud/CodingBridgeAgent/issues"
+Homepage = "https://github.com/AceDataCloud/CodingBridge"
+Issues = "https://github.com/AceDataCloud/CodingBridge/issues"
 
 [tool.hatch.build.targets.wheel]
-packages = ["coding_bridge_agent"]
+packages = ["coding_bridge"]
 
 [tool.ruff]
 line-length = 100

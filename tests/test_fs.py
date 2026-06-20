@@ -1,4 +1,4 @@
-from coding_bridge_agent import fs
+from coding_bridge import fs
 
 
 def test_list_dir_basic(tmp_path):

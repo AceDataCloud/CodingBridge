@@ -1,8 +1,8 @@
 """Session resilience: structured errors, self-healing reset, bounded retry."""
 
-from coding_bridge_agent.config import Settings
-from coding_bridge_agent.protocol import Event, event_payload
-from coding_bridge_agent.session import Session
+from coding_bridge.config import Settings
+from coding_bridge.protocol import Event, event_payload
+from coding_bridge.session import Session
 
 
 class _Crash(Exception):
@@ -144,7 +144,7 @@ async def test_started_event_carries_effort_and_permission_mode():
 
 
 async def test_result_with_sdk_session_id_persists_settings(tmp_path):
-    from coding_bridge_agent import session_meta
+    from coding_bridge import session_meta
 
     settings = Settings(turn_retry_backoff=0.0, config_dir=tmp_path)
 

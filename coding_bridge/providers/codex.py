@@ -36,7 +36,7 @@ _SANDBOX_BY_MODE = {
 }
 _DEFAULT_SANDBOX = "workspace-write"
 _EFFORT_ALIASES = {"max": "high", "ultra-high": "high", "ultrahigh": "high"}
-_EFFORT_VALUES = {"minimal", "low", "medium", "high"}
+_EFFORT_VALUES = {"minimal", "low", "medium", "high", "xhigh"}
 
 # Typewriter cadence for codex agent messages. ``codex exec`` delivers the final
 # message whole, so we replay it as text deltas for visual streaming parity with

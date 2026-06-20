@@ -218,6 +218,8 @@ def test_build_argv_includes_image_args():
         ("ultra-high", "high"),
         ("low", "low"),
         ("medium", "medium"),
+        ("xhigh", "xhigh"),
+        ("minimal", "minimal"),
         ("bogus", None),
         (None, None),
     ],

@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import logging
 import os
 import shutil
@@ -24,27 +25,109 @@ from typing import Any
 
 logger = logging.getLogger("coding-bridge.capabilities")
 
-# Per-provider model catalogs. Labels are proper nouns shown verbatim by the
-# browser; `value` is what we pass to the CLI. Update this list (or ship a new
-# node release) when a backend adds a model and every browser picks it up.
+# Claude models are CLI aliases with no host-side catalog, so they're listed
+# statically (the free-text box still accepts a full model id). Codex is read
+# LIVE from the host instead — see `_codex_models()` — mirroring how Claude's
+# slash commands are read from the host rather than hardcoded.
 _CLAUDE_MODELS: list[dict[str, str]] = [
     {"value": "sonnet", "label": "Claude Sonnet"},
     {"value": "opus", "label": "Claude Opus"},
     {"value": "haiku", "label": "Claude Haiku"},
 ]
-_CODEX_MODELS: list[dict[str, str]] = [
-    {"value": "gpt-5-codex", "label": "GPT-5 Codex"},
-    {"value": "gpt-5", "label": "GPT-5"},
-    {"value": "o3", "label": "o3"},
-]
 
 # Effort tokens are semantic; the browser localizes known ones and shows the raw
 # token for anything new. "" means "use the backend default".
 _CLAUDE_EFFORTS: list[str] = ["", "low", "medium", "high", "max"]
-_CODEX_EFFORTS: list[str] = ["", "low", "medium", "high"]
+
+# Codex host paths. `models_cache.json` is codex's own API-fetched, per-account
+# model catalog (authoritative); config.toml carries the user's chosen default
+# model / effort, used only as a fallback when the cache can't be read.
+CODEX_CONFIG = Path.home() / ".codex" / "config.toml"
+CODEX_MODELS_CACHE = Path.home() / ".codex" / "models_cache.json"
+_CODEX_FALLBACK_MODELS: list[dict[str, str]] = [
+    {"value": "gpt-5.5", "label": "GPT-5.5"},
+    {"value": "gpt-5", "label": "GPT-5"},
+]
+_CODEX_FALLBACK_EFFORTS: list[str] = ["", "low", "medium", "high", "xhigh"]
+_EFFORT_ORDER = ["minimal", "low", "medium", "high", "xhigh"]
 
 # Permission modes are shared; they map to provider sandboxes in each provider.
 _PERMISSION_MODES: list[str] = ["default", "acceptEdits", "plan", "bypassPermissions"]
+
+
+def _codex_config_value(key: str) -> str | None:
+    """Read a top-level ``key = "value"`` string from ~/.codex/config.toml.
+
+    Hand-parsed (no tomllib, so Python 3.10 still works) and only the top-level
+    table — used as a fallback default when the model cache is unavailable.
+    """
+    try:
+        text = CODEX_CONFIG.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("["):
+            break  # entered a sub-table; top-level keys live above it
+        if stripped.startswith("#") or "=" not in stripped:
+            continue
+        name, _, value = stripped.partition("=")
+        if name.strip() != key:
+            continue
+        return value.split("#", 1)[0].strip().strip('"').strip("'") or None
+    return None
+
+
+def _codex_cached_models() -> list[dict[str, Any]]:
+    """Codex's on-host model cache (it refreshes this from its API), restricted to
+    user-visible models and sorted by codex's own priority. ``[]`` if the cache
+    is absent/unreadable. This is the authoritative, per-account model list.
+    """
+    try:
+        data = json.loads(CODEX_MODELS_CACHE.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    models = data.get("models") if isinstance(data, dict) else None
+    if not isinstance(models, list):
+        return []
+    listed = [
+        m
+        for m in models
+        if isinstance(m, dict) and m.get("slug") and m.get("visibility", "list") == "list"
+    ]
+    listed.sort(key=lambda m: m["priority"] if isinstance(m.get("priority"), int) else 1_000_000)
+    return listed
+
+
+def _codex_models() -> list[dict[str, str]]:
+    """Codex models read LIVE from the host cache; minimal fallback otherwise."""
+    cached = _codex_cached_models()
+    if cached:
+        return [{"value": m["slug"], "label": m.get("display_name") or m["slug"]} for m in cached]
+    models = [dict(m) for m in _CODEX_FALLBACK_MODELS]
+    configured = _codex_config_value("model")
+    if configured and not any(m["value"] == configured for m in models):
+        models.insert(0, {"value": configured, "label": configured})
+    return models
+
+
+def _codex_efforts() -> list[str]:
+    """Effort tiers the host's models actually support; minimal fallback otherwise."""
+    found: set[str] = set()
+    for m in _codex_cached_models():
+        for level in m.get("supported_reasoning_levels") or []:
+            effort = level.get("effort") if isinstance(level, dict) else None
+            if isinstance(effort, str) and effort:
+                found.add(effort)
+    if found:
+        ordered = [e for e in _EFFORT_ORDER if e in found]
+        ordered += sorted(e for e in found if e not in _EFFORT_ORDER)
+        return ["", *ordered]
+    efforts = list(_CODEX_FALLBACK_EFFORTS)
+    configured = _codex_config_value("model_reasoning_effort")
+    if configured and configured not in efforts:
+        efforts.append(configured)
+    return efforts
 
 
 def _candidate_cli_paths(cli: str) -> list[str]:
@@ -162,7 +245,7 @@ def describe(settings: Any | None = None) -> dict[str, Any]:
                 supports_code_restore=True,
             ),
             _provider(
-                "codex", "Codex", "codex", _CODEX_MODELS, _CODEX_EFFORTS, settings=settings
+                "codex", "Codex", "codex", _codex_models(), _codex_efforts(), settings=settings
             ),
         ],
     }

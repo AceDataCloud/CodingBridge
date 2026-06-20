@@ -151,18 +151,36 @@ def test_build_argv_new_session():
     assert argv[:2] == ["codex", "exec"]
     assert "resume" not in argv
     assert "--json" in argv
+    # Fresh `codex exec` accepts -s/--sandbox.
     assert argv[argv.index("-s") + 1] == "workspace-write"
     assert argv[argv.index("-m") + 1] == "gpt-5-codex"
     assert "model_reasoning_effort=high" in argv
-    assert argv[-1] == "do it"
+    # `--` guards the prompt (variadic -i / leading-dash) and it stays last.
+    assert argv[-2:] == ["--", "do it"]
 
 
 def test_build_argv_resume_uses_thread_id():
     provider, _ = _provider()
+    provider._sandbox = "workspace-write"
     provider._thread_id = "thread-9"
     argv = provider._build_argv("more", resume=True, image_paths=[])
-    assert argv[:4] == ["codex", "exec", "resume", "thread-9"]
-    assert argv[-1] == "more"
+    assert argv[:3] == ["codex", "exec", "resume"]
+    # `codex exec resume` rejects -s; sandbox must ride on a -c config override.
+    assert "-s" not in argv
+    assert '-c' in argv and 'sandbox_mode="workspace-write"' in argv
+    # SESSION_ID then PROMPT come after `--`, in that order.
+    assert argv[-3:] == ["--", "thread-9", "more"]
+
+
+def test_build_argv_resume_protects_dash_prompt_and_images():
+    provider, _ = _provider()
+    provider._sandbox = "read-only"
+    provider._thread_id = "t-7"
+    argv = provider._build_argv("-s is literal text", resume=True, image_paths=["/tmp/a.png"])
+    assert "-s" not in argv  # the only -s-looking token is inside the prompt, after --
+    sep = argv.index("--")
+    assert argv[sep + 1 :] == ["t-7", "-s is literal text"]
+    assert argv[argv.index("-i") + 1] == "/tmp/a.png"
 
 
 async def test_send_applies_model_effort_and_sandbox_overrides():

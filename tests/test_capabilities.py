@@ -1,3 +1,5 @@
+import json
+
 from coding_bridge import capabilities
 from coding_bridge.config import Settings
 
@@ -6,6 +8,72 @@ def test_describe_lists_both_providers():
     desc = capabilities.describe()
     names = [p["name"] for p in desc["providers"]]
     assert names == ["claude", "codex"]
+
+
+def _write_models_cache(tmp_path, monkeypatch):
+    cache = tmp_path / "models_cache.json"
+    cache.write_text(
+        json.dumps(
+            {
+                "models": [
+                    {
+                        "slug": "gpt-5.4",
+                        "display_name": "GPT-5.4",
+                        "visibility": "list",
+                        "priority": 16,
+                        "supported_reasoning_levels": [{"effort": "low"}, {"effort": "high"}],
+                    },
+                    {
+                        "slug": "gpt-5.5",
+                        "display_name": "GPT-5.5",
+                        "visibility": "list",
+                        "priority": 9,
+                        "supported_reasoning_levels": [{"effort": "medium"}, {"effort": "xhigh"}],
+                    },
+                    {
+                        "slug": "codex-auto-review",
+                        "display_name": "Auto Review",
+                        "visibility": "hide",
+                        "priority": 1,
+                    },
+                ]
+            }
+        )
+    )
+    monkeypatch.setattr(capabilities, "CODEX_MODELS_CACHE", cache)
+    return cache
+
+
+def test_codex_models_read_from_host_cache(monkeypatch, tmp_path):
+    _write_models_cache(tmp_path, monkeypatch)
+    models = capabilities._codex_models()
+    # Sorted by codex's priority; the `hide` model is excluded; slug+display kept.
+    assert models == [
+        {"value": "gpt-5.5", "label": "GPT-5.5"},
+        {"value": "gpt-5.4", "label": "GPT-5.4"},
+    ]
+    # Efforts are the union of the listed models' supported levels, canonical order.
+    assert capabilities._codex_efforts() == ["", "low", "medium", "high", "xhigh"]
+
+
+def test_codex_catalog_falls_back_to_config_without_cache(monkeypatch, tmp_path):
+    monkeypatch.setattr(capabilities, "CODEX_MODELS_CACHE", tmp_path / "nope.json")
+    cfg = tmp_path / "config.toml"
+    cfg.write_text(
+        'model = "gpt-6-codex"\n'
+        'model_reasoning_effort = "insane"\n'
+        "[tui]\n"
+        'model = "ignored"\n'
+    )
+    monkeypatch.setattr(capabilities, "CODEX_CONFIG", cfg)
+    models = [m["value"] for m in capabilities._codex_models()]
+    assert models[0] == "gpt-6-codex"  # configured model surfaces first, no node release
+    assert "insane" in capabilities._codex_efforts()  # top-level only; [tui] is ignored
+
+
+def test_codex_config_value_missing_file_is_none(monkeypatch, tmp_path):
+    monkeypatch.setattr(capabilities, "CODEX_CONFIG", tmp_path / "nope.toml")
+    assert capabilities._codex_config_value("model") is None
 
 
 def test_describe_marks_availability_from_which(monkeypatch):

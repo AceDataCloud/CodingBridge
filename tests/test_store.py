@@ -1,4 +1,4 @@
-from coding_bridge_agent import store
+from coding_bridge import store
 
 
 def test_roundtrip(tmp_path):

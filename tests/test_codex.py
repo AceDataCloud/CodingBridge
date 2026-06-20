@@ -1,8 +1,8 @@
 import pytest
 
-from coding_bridge_agent.config import Settings
-from coding_bridge_agent.protocol import Event
-from coding_bridge_agent.providers.codex import CodexProvider, _codex_effort
+from coding_bridge.config import Settings
+from coding_bridge.protocol import Event
+from coding_bridge.providers.codex import CodexProvider, _codex_effort
 
 
 def _provider():
@@ -137,7 +137,7 @@ async def test_transient_error_is_buffered_not_emitted():
     ],
 )
 def test_permission_mode_maps_to_sandbox(mode, sandbox):
-    from coding_bridge_agent.providers.codex import _DEFAULT_SANDBOX, _SANDBOX_BY_MODE
+    from coding_bridge.providers.codex import _DEFAULT_SANDBOX, _SANDBOX_BY_MODE
 
     assert _SANDBOX_BY_MODE.get(mode, _DEFAULT_SANDBOX) == sandbox
 

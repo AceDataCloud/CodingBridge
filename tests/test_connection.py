@@ -1,10 +1,10 @@
 import asyncio
 import json
 
-from coding_bridge_agent import protocol
-from coding_bridge_agent.config import Settings
-from coding_bridge_agent.connection import BridgeConnection
-from coding_bridge_agent.protocol import Action, Event
+from coding_bridge import protocol
+from coding_bridge.config import Settings
+from coding_bridge.connection import BridgeConnection
+from coding_bridge.protocol import Action, Event
 
 
 class FakeProvider:
@@ -454,7 +454,7 @@ async def test_history_list_does_not_flag_idle_in_memory_session(monkeypatch):
     """A completed session stays in the registry (reattachable) but is idle, so it
     must NOT be flagged running — otherwise every in-memory session shows a live
     dot in the drawer."""
-    from coding_bridge_agent import history
+    from coding_bridge import history
 
     conn = _identifying_conn()  # IdentifyingProvider finishes its turn immediately
     await conn._dispatch({"action": Action.SESSION_START, "session_id": "prov-1", "prompt": "hi"})
@@ -474,7 +474,7 @@ async def test_history_list_does_not_flag_idle_in_memory_session(monkeypatch):
 
 async def test_history_list_flags_only_actively_running_session(monkeypatch):
     """Only a session executing a turn right now is flagged running."""
-    from coding_bridge_agent import history
+    from coding_bridge import history
 
     gate = asyncio.Event()
 

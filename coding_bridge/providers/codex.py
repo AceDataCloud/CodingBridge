@@ -25,7 +25,7 @@ if TYPE_CHECKING:
     from ..config import Settings
     from .base import AskPermissionFn, EmitFn
 
-logger = logging.getLogger("coding-bridge-agent.codex")
+logger = logging.getLogger("coding-bridge.codex")
 
 # permission_mode -> codex sandbox policy (exec has no interactive approvals).
 _SANDBOX_BY_MODE = {

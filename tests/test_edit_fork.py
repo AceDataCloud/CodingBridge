@@ -8,10 +8,10 @@ code restore, the capability flags, and that Codex reports edit unsupported.
 
 import json
 
-from coding_bridge_agent import capabilities, history
-from coding_bridge_agent.config import Settings
-from coding_bridge_agent.providers.claude import ClaudeProvider
-from coding_bridge_agent.providers.codex import CodexProvider
+from coding_bridge import capabilities, history
+from coding_bridge.config import Settings
+from coding_bridge.providers.claude import ClaudeProvider
+from coding_bridge.providers.codex import CodexProvider
 
 
 def _capturing(provider_cls=ClaudeProvider):

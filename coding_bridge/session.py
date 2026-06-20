@@ -13,7 +13,7 @@ from .permissions import PermissionBroker, Resolution
 from .protocol import Event, event_payload
 from .providers.base import AskPermissionFn, EmitFn, ProviderFactory
 
-logger = logging.getLogger("coding-bridge-agent.session")
+logger = logging.getLogger("coding-bridge.session")
 
 # Distinguishes "caller omitted this override" from "caller cleared it to default".
 _UNSET: Any = object()

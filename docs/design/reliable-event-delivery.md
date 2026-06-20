@@ -1,7 +1,7 @@
 # Reliable Event Delivery for Coding Bridge
 
 **Status:** Proposed (design + protocol v2 spec)
-**Scope:** 3 repos — `CodingBridgeAgent` (node), `coding-bridge` relay (in
+**Scope:** 3 repos — `CodingBridge` (node), `coding-bridge` relay (in
 `PlatformService/coding-bridge/worker/app/` on `origin/main`), `Nexior` (browser)
 **Author:** (design)
 **Supersedes:** the implicit "history is the recovery path" behaviour.
@@ -267,7 +267,7 @@ the node acks `browser.cmd_ack { up_to_cmd_seq }`. Out of scope for Phases 1–3
   `history.get`, then resumes live from the newest `seq`.
 - **GC:** drop a session's log on `session.closed` + grace, or on TTL/idle.
 
-### 6.2 Node (`CodingBridgeAgent`)
+### 6.2 Node (`CodingBridge`)
 
 - **Delete the silent drop** in `_send_envelope`. Disconnected sends **enqueue**.
 - **Outbox** per connection epoch: `deque[(node_seq, envelope)]`, bounded. On

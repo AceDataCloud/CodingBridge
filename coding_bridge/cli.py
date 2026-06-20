@@ -87,7 +87,7 @@ async def _run_connection(settings: Settings, token: str) -> None:
         lock.acquire()
     except AlreadyRunning:
         print(
-            "Another coding-bridge-agent is already running for this device.\n"
+            "Another coding-bridge is already running for this device.\n"
             "Stop it before starting a new one — two instances fight over the\n"
             "connection and break every session. If it autostarts (a service or\n"
             "scheduled task), do not also run it manually.",
@@ -122,7 +122,7 @@ def cmd_run(args: argparse.Namespace) -> None:
     settings = _build_settings(args)
     creds = store.load(settings.credentials_path)
     if not creds or not creds.get("node_token"):
-        print("Not paired. Run `coding-bridge-agent pair` first.", file=sys.stderr)
+        print("Not paired. Run `coding-bridge pair` first.", file=sys.stderr)
         raise SystemExit(1)
     asyncio.run(_run_connection(settings, creds["node_token"]))
 
@@ -210,7 +210,7 @@ def main(argv: list[str] | None = None) -> None:
     )
 
     parser = argparse.ArgumentParser(
-        prog="coding-bridge-agent",
+        prog="coding-bridge",
         description="Run Claude Code on this machine, driven from the AceDataCloud web app.",
         parents=[common],
     )

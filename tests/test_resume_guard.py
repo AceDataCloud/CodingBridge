@@ -5,8 +5,8 @@ own result) before the new turn. Those replayed messages reuse the transcript's
 original ids; the guard drops them and forwards only the genuine turn.
 """
 
-from coding_bridge_agent.config import Settings
-from coding_bridge_agent.providers.claude import ClaudeProvider
+from coding_bridge.config import Settings
+from coding_bridge.providers.claude import ClaudeProvider
 
 
 def _capturing():

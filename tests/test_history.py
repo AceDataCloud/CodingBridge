@@ -1,9 +1,9 @@
 import json
 
-from coding_bridge_agent import history, protocol
-from coding_bridge_agent.config import Settings
-from coding_bridge_agent.connection import BridgeConnection
-from coding_bridge_agent.protocol import Action, Event
+from coding_bridge import history, protocol
+from coding_bridge.config import Settings
+from coding_bridge.connection import BridgeConnection
+from coding_bridge.protocol import Action, Event
 
 CODEX_SID = "11111111-1111-1111-1111-111111111111"
 
@@ -395,7 +395,7 @@ async def test_dispatch_history_get_emits_detail(monkeypatch):
 
 
 async def test_dispatch_history_get_folds_in_sidecar(monkeypatch, tmp_path):
-    from coding_bridge_agent import session_meta
+    from coding_bridge import session_meta
 
     # Transcript carries cwd/model but not effort/permission_mode.
     monkeypatch.setattr(

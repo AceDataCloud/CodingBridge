@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from coding_bridge_agent.config import Settings
+from coding_bridge.config import Settings
 
 
 def test_ws_url_from_https():

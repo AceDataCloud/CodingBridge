@@ -1,6 +1,6 @@
 import asyncio
 
-from coding_bridge_agent.permissions import PermissionBroker, Resolution
+from coding_bridge.permissions import PermissionBroker, Resolution
 
 
 async def test_resolve_allow():

@@ -13,7 +13,7 @@ your files and never runs anything.
 
 ```
 ┌────────────┐   wss (Ace JWT)   ┌───────────────┐   wss (node token)   ┌──────────────────────┐
-│  Browser   │ ───────────────►  │ coding-bridge │ ───────────────────► │  coding-bridge-agent │
+│  Browser   │ ───────────────►  │ coding-bridge │ ───────────────────► │  coding-bridge       │
 │ (Nexior)   │ ◄───────────────  │    (relay)    │ ◄─────────────────── │  (this daemon)       │
 └────────────┘                   └───────────────┘                      │   └─ Claude Code     │
                                                                         └──────────────────────┘
@@ -42,21 +42,21 @@ sandbox policy (plan → read-only, default/acceptEdits → workspace-write,
 bypassPermissions → danger-full-access).
 
 ```bash
-pipx install coding-bridge-agent      # recommended
+pipx install coding-bridge      # recommended
 # or
-pip install coding-bridge-agent
+pip install coding-bridge
 ```
 
 For the ASCII-QR pairing helper, install the optional extra:
 
 ```bash
-pipx install "coding-bridge-agent[qr]"
+pipx install "coding-bridge[qr]"
 ```
 
 ## Quick start
 
 ```bash
-coding-bridge-agent up
+coding-bridge up
 ```
 
 On first run this pairs your machine: it prints a short pair code (and a QR
@@ -64,7 +64,7 @@ code). Open the link in Nexior, sign in with your Ace account, and enter the
 code. Once claimed, the daemon stores a node token at
 `~/.ace-bridge/credentials.json` (mode `0600`) and starts serving sessions.
 
-Subsequent runs reuse the stored token, so `coding-bridge-agent up` just
+Subsequent runs reuse the stored token, so `coding-bridge up` just
 connects.
 
 ## Commands
@@ -113,7 +113,7 @@ CLI flags override environment values.
   browser as a permission request. Nothing runs until you allow it; a configurable
   timeout denies by default.
 - **Scoped token.** Pairing yields a node token tied to your Ace account, stored
-  locally with `0600` permissions. `coding-bridge-agent logout` removes it; the
+  locally with `0600` permissions. `coding-bridge logout` removes it; the
   bridge can revoke it server-side.
 - **Directory browser & images stay local.** The `fs.list` action lets the
   paired browser list directories to pick a working directory, and pasted images
@@ -127,17 +127,17 @@ CLI flags override environment values.
 - **coding-bridge** — the stateful relay (one component of the AceDataCloud
   platform) that authenticates browsers (Ace JWT) and nodes (node token), and
   forwards messages between them.
-- **coding-bridge-agent** (this repo) — the node daemon you run locally.
+- **coding-bridge** (this repo) — the node daemon you run locally.
 - **Nexior** — the web/mobile UI that pairs nodes and renders sessions.
 
 The node is the source of truth for the options the UI offers: it answers
 `capabilities.get` with the providers it supports and each one's models, effort
-tiers, and permission modes (see [`capabilities.py`](coding_bridge_agent/capabilities.py)).
+tiers, and permission modes (see [`capabilities.py`](coding_bridge/capabilities.py)).
 The browser renders whatever the node reports, so adding a model is a node-side
 change — never a web rebuild.
 
 The wire protocol (envelope `type`s, the inner `Action`/`Event` sub-protocol)
-is documented in [`coding_bridge_agent/protocol.py`](coding_bridge_agent/protocol.py).
+is documented in [`coding_bridge/protocol.py`](coding_bridge/protocol.py).
 
 ## Development
 

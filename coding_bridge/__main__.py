@@ -1,4 +1,4 @@
-"""``python -m coding_bridge_agent`` entry point."""
+"""``python -m coding_bridge`` entry point."""
 from __future__ import annotations
 
 from .cli import main

@@ -13,7 +13,8 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -106,14 +107,37 @@ def read_session(provider: str, session_id: str) -> dict[str, Any]:
         header, events = _codex_read(path, _codex_index())
     else:
         raise ValueError(f"unknown provider: {provider}")
+    # Keep the MOST RECENT events when a transcript is huge — the tail is the
+    # live context a user wants to continue, not the opening. `truncated` lets the
+    # browser flag that earlier messages were dropped.
+    truncated = len(events) > _DETAIL_MAX_EVENTS
     return {
         "provider": provider,
         "title": header.get("title") or "(no prompt)",
         "cwd": header.get("cwd"),
         "git_branch": header.get("git_branch"),
         "model": header.get("model"),
-        "events": events[:_DETAIL_MAX_EVENTS],
+        "events": events[-_DETAIL_MAX_EVENTS:],
+        "truncated": truncated,
     }
+
+
+# Summarising a transcript reads the whole file, so listing many sessions is
+# dominated by per-file IO. Fan the reads out across a small thread pool (the
+# reads release the GIL); order and OSError-skipping match the old serial loop.
+def _summaries(paths: list[Path], parse: Callable[[Path], dict[str, Any]]) -> list[dict[str, Any]]:
+    if not paths:
+        return []
+
+    def _one(path: Path) -> dict[str, Any] | None:
+        try:
+            return parse(path)
+        except OSError:
+            return None
+
+    with ThreadPoolExecutor(max_workers=min(8, len(paths))) as pool:
+        results = list(pool.map(_one, paths))
+    return [r for r in results if r is not None]
 
 
 # --- Claude Code -----------------------------------------------------------
@@ -121,13 +145,7 @@ def _list_claude(limit: int) -> list[dict[str, Any]]:
     if not CLAUDE_ROOT.exists():
         return []
     files = sorted(CLAUDE_ROOT.glob("*/*.jsonl"), key=_safe_mtime, reverse=True)[:limit]
-    out: list[dict[str, Any]] = []
-    for path in files:
-        try:
-            out.append(_claude_summary(path))
-        except OSError:
-            continue
-    return out
+    return _summaries(files, _claude_summary)
 
 
 def _claude_summary(path: Path) -> dict[str, Any]:
@@ -261,13 +279,7 @@ def _list_codex(limit: int) -> list[dict[str, Any]]:
         return []
     files = sorted(CODEX_ROOT.glob("**/rollout-*.jsonl"), key=_safe_mtime, reverse=True)[:limit]
     index = _codex_index()
-    out: list[dict[str, Any]] = []
-    for path in files:
-        try:
-            out.append(_codex_summary(path, index))
-        except OSError:
-            continue
-    return out
+    return _summaries(files, lambda path: _codex_summary(path, index))
 
 
 def _codex_summary(path: Path, index: dict[str, dict[str, Any]]) -> dict[str, Any]:

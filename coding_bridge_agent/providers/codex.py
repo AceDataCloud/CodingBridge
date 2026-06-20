@@ -192,17 +192,33 @@ class CodexProvider:
         return True
 
     def _build_argv(self, prompt: str, *, resume: bool, image_paths: list[str]) -> list[str]:
+        thread_id = self._thread_id if resume else None
         argv = ["codex", "exec"]
-        if resume and self._thread_id:
-            argv += ["resume", self._thread_id]
-        argv += ["--json", "--skip-git-repo-check", "-s", self._sandbox]
+        if thread_id:
+            argv.append("resume")
+        argv += ["--json", "--skip-git-repo-check"]
+        # `codex exec` takes -s/--sandbox, but `codex exec resume` rejects it (its
+        # only sandbox knob is a -c config override) — passing -s there aborts the
+        # turn with `unexpected argument '-s'`, so set the policy via -c on resume.
+        if thread_id:
+            argv += ["-c", f'sandbox_mode="{self._sandbox}"']
+        else:
+            argv += ["-s", self._sandbox]
         if self._model:
             argv += ["-m", self._model]
         if self._effort:
             argv += ["-c", f"model_reasoning_effort={self._effort}"]
+        # Each image is its own -i (resume's -i is single-valued; never collapse).
         for path in image_paths:
             argv += ["-i", path]
-        argv.append(prompt)
+        # `--` terminates option parsing so a prompt starting with `-`, and
+        # `exec`'s variadic -i, can't swallow the prompt / misparse positionals.
+        # resume positionals are [SESSION_ID] [PROMPT]; a fresh exec takes [PROMPT].
+        argv.append("--")
+        if thread_id:
+            argv += [thread_id, prompt]
+        else:
+            argv.append(prompt)
         return argv
 
     async def _run_turn(
@@ -227,6 +243,7 @@ class CodexProvider:
         self._proc = await asyncio.create_subprocess_exec(
             *argv,
             cwd=self._cwd or None,
+            stdin=asyncio.subprocess.DEVNULL,  # never block reading an inherited stdin
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )

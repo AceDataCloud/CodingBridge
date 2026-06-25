@@ -39,6 +39,17 @@ _CLAUDE_MODELS: list[dict[str, str]] = [
 # token for anything new. "" means "use the backend default".
 _CLAUDE_EFFORTS: list[str] = ["", "low", "medium", "high", "max"]
 
+# Copilot models are GitHub-hosted aliases with no host-side catalog, so they're
+# listed statically; the free-text box still accepts any model id `copilot help`
+# reports (allow_custom_model is on). Defaults track the CLI's current lineup.
+_COPILOT_MODELS: list[dict[str, str]] = [
+    {"value": "claude-sonnet-4.5", "label": "Claude Sonnet 4.5"},
+    {"value": "claude-haiku-4.5", "label": "Claude Haiku 4.5"},
+    {"value": "gpt-5.2", "label": "GPT-5.2"},
+    {"value": "gpt-5.3-codex", "label": "GPT-5.3 Codex"},
+]
+_COPILOT_EFFORTS: list[str] = ["", "low", "medium", "high"]
+
 # Codex host paths. `models_cache.json` is codex's own API-fetched, per-account
 # model catalog (authoritative); config.toml carries the user's chosen default
 # model / effort, used only as a fallback when the cache can't be read.
@@ -189,7 +200,7 @@ def ensure_clis_on_path(settings: Any | None = None) -> list[str]:
     """
     path_entries = os.environ.get("PATH", "").split(os.pathsep)
     added: list[str] = []
-    for cli in ("claude", "codex"):
+    for cli in ("claude", "codex", "copilot"):
         resolved = resolve_cli(cli, settings)
         if not resolved:
             continue
@@ -247,6 +258,14 @@ def describe(settings: Any | None = None) -> dict[str, Any]:
             _provider(
                 "codex", "Codex", "codex", _codex_models(), _codex_efforts(), settings=settings
             ),
+            _provider(
+                "copilot",
+                "GitHub Copilot",
+                "copilot",
+                _COPILOT_MODELS,
+                _COPILOT_EFFORTS,
+                settings=settings,
+            ),
         ],
     }
 
@@ -261,11 +280,14 @@ async def describe_detailed(settings: Any) -> dict[str, Any]:
     desc = describe(settings)
     claude_commands = await _claude_commands(settings)
     codex_commands = _codex_commands()
+    copilot_commands = _copilot_commands()
     for provider in desc["providers"]:
         if provider["name"] == "claude":
             provider["commands"] = claude_commands
         elif provider["name"] == "codex":
             provider["commands"] = codex_commands
+        elif provider["name"] == "copilot":
+            provider["commands"] = copilot_commands
     return desc
 
 
@@ -360,6 +382,29 @@ def _codex_commands() -> list[dict[str, Any]]:
     slash commands cannot run remotely.
     """
     home = os.environ.get("CODEX_HOME") or os.path.join(os.path.expanduser("~"), ".codex")
+    prompts_dir = Path(home) / "prompts"
+    if not prompts_dir.is_dir():
+        return []
+    commands: list[dict[str, Any]] = []
+    try:
+        entries = sorted(prompts_dir.glob("*.md"))
+    except OSError:
+        return []
+    for path in entries:
+        name = path.stem
+        if not name:
+            continue
+        commands.append({"name": name, "description": "", "argument_hint": "", "aliases": []})
+    return commands
+
+
+def _copilot_commands() -> list[dict[str, Any]]:
+    """Copilot custom prompts (`$COPILOT_HOME/prompts/*.md`) surfaced as commands.
+
+    Only user-defined prompt files are advertised; Copilot's interactive slash
+    commands aren't driven over ACP. Empty when the prompts dir is absent.
+    """
+    home = os.environ.get("COPILOT_HOME") or os.path.join(os.path.expanduser("~"), ".copilot")
     prompts_dir = Path(home) / "prompts"
     if not prompts_dir.is_dir():
         return []

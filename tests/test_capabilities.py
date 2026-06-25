@@ -4,10 +4,10 @@ from coding_bridge import capabilities
 from coding_bridge.config import Settings
 
 
-def test_describe_lists_both_providers():
+def test_describe_lists_providers():
     desc = capabilities.describe()
     names = [p["name"] for p in desc["providers"]]
-    assert names == ["claude", "codex"]
+    assert names == ["claude", "codex", "copilot"]
 
 
 def _write_models_cache(tmp_path, monkeypatch):

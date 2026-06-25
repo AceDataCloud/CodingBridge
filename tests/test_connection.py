@@ -387,7 +387,7 @@ async def test_capabilities_get_returns_descriptor():
     ]
     assert caps
     names = [p["name"] for p in caps[0]["providers"]]
-    assert names == ["claude", "codex"]
+    assert names == ["claude", "codex", "copilot"]
 
 
 # --- Session identity (re-key on real id, reattach on resume) ----------------

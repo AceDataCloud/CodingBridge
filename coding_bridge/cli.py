@@ -29,6 +29,8 @@ def _build_settings(args: argparse.Namespace) -> Settings:
         settings.claude_path = args.claude_path
     if getattr(args, "codex_path", None):
         settings.codex_path = args.codex_path
+    if getattr(args, "copilot_path", None):
+        settings.copilot_path = args.copilot_path
     if getattr(args, "cwd", None):
         settings.default_cwd = args.cwd
     if getattr(args, "permission_timeout", None) is not None:
@@ -95,8 +97,8 @@ async def _run_connection(settings: Settings, token: str) -> None:
         )
         raise SystemExit(1) from None
     # A daemon launched outside the user's login shell (no nvm/volta/.local on
-    # PATH) can't see `claude`/`codex` even when installed; surface the resolved
-    # dirs onto PATH so the SDK and `codex exec` actually find them.
+    # PATH) can't see `claude`/`codex`/`copilot` even when installed; surface the
+    # resolved dirs onto PATH so the SDK and the CLIs actually find them.
     added = capabilities.ensure_clis_on_path(settings)
     if added:
         logging.getLogger(logs.ROOT_LOGGER).info("added to PATH for CLI discovery: %s", added)
@@ -173,6 +175,11 @@ def _add_run_args(parser: argparse.ArgumentParser) -> None:
         "--codex-path",
         dest="codex_path",
         help="Path to the codex CLI (when PATH can't find it)",
+    )
+    parser.add_argument(
+        "--copilot-path",
+        dest="copilot_path",
+        help="Path to the GitHub Copilot CLI (when PATH can't find it)",
     )
     parser.add_argument(
         "--permission-timeout",

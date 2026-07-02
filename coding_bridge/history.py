@@ -1,8 +1,9 @@
-"""Read local Claude Code and Codex transcripts for history replay.
+"""Read local Claude Code, Codex, and Copilot transcripts for history replay.
 
 Transcripts live on disk as JSON lines:
   Claude Code: ``~/.claude/projects/<cwd-slug>/<session_id>.jsonl``
   Codex:       ``~/.codex/sessions/YYYY/MM/DD/rollout-<ts>-<session_id>.jsonl``
+  Copilot:     ``$COPILOT_HOME/session-state/<session_id>/events.jsonl``
 
 Both formats are normalised to the same inner event shapes a live session emits
 (``prompt`` / ``text`` / ``thinking`` / ``tool_use`` / ``tool_result``) so the
@@ -12,6 +13,7 @@ depends only on the standard library.
 from __future__ import annotations
 
 import json
+import os
 import re
 from collections.abc import Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
@@ -23,6 +25,9 @@ from typing import Any
 CLAUDE_ROOT = Path.home() / ".claude" / "projects"
 CODEX_ROOT = Path.home() / ".codex" / "sessions"
 CODEX_INDEX = Path.home() / ".codex" / "session_index.jsonl"
+COPILOT_ROOT = (
+    Path(os.environ.get("COPILOT_HOME") or str(Path.home() / ".copilot")) / "session-state"
+)
 
 _TITLE_MAX = 80
 _DETAIL_MAX_EVENTS = 4000
@@ -39,7 +44,7 @@ _UUID_RE = re.compile(
 def list_sessions(limit: int = 200) -> list[dict[str, Any]]:
     """Return session summaries from both providers, newest first."""
     limit = max(1, min(int(limit or 200), 1000))
-    sessions = _list_claude(limit) + _list_codex(limit)
+    sessions = _list_claude(limit) + _list_codex(limit) + _list_copilot(limit)
     sessions.sort(key=lambda s: s.get("updated_at") or 0, reverse=True)
     return sessions[:limit]
 
@@ -105,6 +110,11 @@ def read_session(provider: str, session_id: str) -> dict[str, Any]:
         if path is None:
             raise FileNotFoundError(f"codex session not found: {session_id}")
         header, events = _codex_read(path, _codex_index())
+    elif provider == "copilot":
+        path = _copilot_path(session_id)
+        if path is None:
+            raise FileNotFoundError(f"copilot session not found: {session_id}")
+        header, events = _copilot_read(path)
     else:
         raise ValueError(f"unknown provider: {provider}")
     # Keep the MOST RECENT events when a transcript is huge — the tail is the
@@ -454,6 +464,167 @@ def _codex_sid_from_name(path: Path) -> str:
     return match.group(0) if match else path.stem
 
 
+def _list_copilot(limit: int) -> list[dict[str, Any]]:
+    if not COPILOT_ROOT.exists():
+        return []
+    files = sorted(COPILOT_ROOT.glob("*/events.jsonl"), key=_safe_mtime, reverse=True)[:limit]
+    return _summaries(files, _copilot_summary)
+
+
+def _copilot_summary(path: Path) -> dict[str, Any]:
+    meta = _copilot_workspace_meta(path.parent)
+    title = ""
+    count = 0
+    cwd = meta.get("cwd")
+    updated_at = _mtime_ms(path)
+    for rec in _iter_jsonl(path):
+        ts = _iso_ms(rec.get("timestamp"))
+        if ts is not None:
+            updated_at = ts
+        etype = rec.get("type")
+        data = rec.get("data")
+        if not isinstance(data, dict):
+            data = {}
+        if etype == "session.start" and cwd is None:
+            cwd = _copilot_cwd(data) or cwd
+        elif etype == "user.message":
+            text = _copilot_user_text(data)
+            if text:
+                count += 1
+                if not title and not _is_context_noise(text):
+                    title = _clean_title(text)
+        elif etype == "assistant.message" and _copilot_assistant_text(data):
+            count += 1
+    return {
+        "provider": "copilot",
+        "session_id": path.parent.name,
+        "title": meta.get("name") or title or "(no prompt)",
+        "cwd": cwd,
+        "git_branch": None,
+        "updated_at": updated_at,
+        "message_count": count,
+    }
+
+
+def _copilot_read(path: Path) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    meta = _copilot_workspace_meta(path.parent)
+    header: dict[str, Any] = {
+        "cwd": meta.get("cwd"),
+        "git_branch": None,
+        "model": None,
+        "title": meta.get("name") or "",
+    }
+    events: list[dict[str, Any]] = []
+    for rec in _iter_jsonl(path):
+        etype = rec.get("type")
+        data = rec.get("data")
+        if not isinstance(data, dict):
+            data = {}
+        ts = _iso_ms(rec.get("timestamp"))
+        if etype == "session.start":
+            header["cwd"] = _copilot_cwd(data) or header["cwd"]
+        elif etype == "session.model_change":
+            model = data.get("newModel")
+            if isinstance(model, str) and model:
+                header["model"] = model
+        elif etype == "user.message":
+            text = _copilot_user_text(data)
+            if not text or _is_context_noise(text):
+                continue
+            events.append({"kind": "prompt", "text": text, "ts": ts})
+            if not header["title"]:
+                header["title"] = _clean_title(text)
+        elif etype == "assistant.message":
+            model = data.get("model")
+            if header["model"] is None and isinstance(model, str) and model:
+                header["model"] = model
+            text = _copilot_assistant_text(data)
+            if text:
+                events.append({"kind": "text", "text": text, "ts": ts})
+        elif etype == "tool.execution_start":
+            events.append(
+                {
+                    "kind": "tool_use",
+                    "tool": data.get("toolName"),
+                    "tool_use_id": data.get("toolCallId"),
+                    "input": data.get("arguments"),
+                    "ts": ts,
+                }
+            )
+        elif etype == "tool.execution_complete":
+            events.append(
+                {
+                    "kind": "tool_result",
+                    "tool_use_id": data.get("toolCallId"),
+                    "content": _copilot_tool_result_text(data),
+                    "is_error": not bool(data.get("success")),
+                    "ts": ts,
+                }
+            )
+    return header, events
+
+
+def _copilot_path(session_id: str) -> Path | None:
+    # session_id is joined straight into a path, so reject the traversal tokens
+    # `_ID_RE` would otherwise allow (`.`/`..`); slashes are already disallowed.
+    if not _safe_id(session_id) or session_id in (".", ".."):
+        return None
+    path = COPILOT_ROOT / session_id / "events.jsonl"
+    return path if path.is_file() else None
+
+
+def _copilot_workspace_meta(session_dir: Path) -> dict[str, Any]:
+    meta = _simple_yaml(session_dir / "workspace.yaml")
+    return {
+        "cwd": meta.get("cwd") if isinstance(meta.get("cwd"), str) else None,
+        "name": meta.get("name") if isinstance(meta.get("name"), str) else None,
+    }
+
+
+def _copilot_cwd(data: dict[str, Any]) -> str | None:
+    context = data.get("context")
+    if not isinstance(context, dict):
+        return None
+    cwd = context.get("cwd")
+    return cwd if isinstance(cwd, str) and cwd else None
+
+
+def _copilot_user_text(data: dict[str, Any]) -> str:
+    content = data.get("content")
+    if isinstance(content, str) and content.strip():
+        return content.strip()
+    transformed = data.get("transformedContent")
+    if isinstance(transformed, str):
+        # Copilot wraps the typed prompt with a leading <current_datetime> block
+        # and a trailing <system_reminder>; strip those before generic unwrapping.
+        transformed = _COPILOT_NOW_RE.sub("", transformed)
+        transformed = _COPILOT_REMINDER_RE.sub("", transformed)
+        return _unwrap_user_text(transformed).strip()
+    return ""
+
+
+def _copilot_assistant_text(data: dict[str, Any]) -> str:
+    content = data.get("content")
+    if isinstance(content, str):
+        return content.strip()
+    return ""
+
+
+def _copilot_tool_result_text(data: dict[str, Any]) -> Any:
+    if data.get("success"):
+        result = data.get("result")
+        if isinstance(result, dict):
+            if result.get("content") is not None:
+                return _stringify(result.get("content"))
+            if result.get("detailedContent") is not None:
+                return _stringify(result.get("detailedContent"))
+        return _stringify(result)
+    error = data.get("error")
+    if isinstance(error, dict) and error.get("message") is not None:
+        return _stringify(error.get("message"))
+    return _stringify(error)
+
+
 # --- shared helpers --------------------------------------------------------
 def _iter_jsonl(path: Path) -> Iterator[dict[str, Any]]:
     try:
@@ -492,7 +663,8 @@ def _clean_title(text: str) -> str:
 
 
 # Tool-injected context messages that are not real user prompts: Codex AGENTS.md
-# / instruction / environment preambles and Claude IDE open-file reminders.
+# / instruction / environment preambles, Copilot wrappers, and Claude IDE
+# open-file reminders.
 _NOISE_PREFIXES = (
     "# agents.md instructions",
     "# copilot instructions",
@@ -530,14 +702,50 @@ def _is_context_noise(text: str) -> bool:
 _IDE_REQUEST_RE = re.compile(
     r"##\s*My request(?: for Codex)?:\s*\n?(.*)", re.IGNORECASE | re.DOTALL
 )
+_COPILOT_NOW_RE = re.compile(
+    r"^\s*<current_datetime>.*?</current_datetime>\s*", re.IGNORECASE | re.DOTALL
+)
+_COPILOT_REMINDER_RE = re.compile(
+    r"\s*<system_reminder>.*?</system_reminder>\s*$", re.IGNORECASE | re.DOTALL
+)
 
 
 def _unwrap_user_text(text: str) -> str:
     """Pull the typed prompt out of a Codex IDE-context wrapper; else return as-is."""
+    if not text:
+        return ""
     if text and text.lstrip().lower().startswith("# context from my ide setup"):
         match = _IDE_REQUEST_RE.search(text)
         return match.group(1).strip() if match else ""
-    return text
+    return text.strip()
+
+
+def _simple_yaml(path: Path) -> dict[str, Any]:
+    data: dict[str, Any] = {}
+    try:
+        with open(path, encoding="utf-8") as handle:
+            for raw_line in handle:
+                line = raw_line.strip()
+                if not line or line.startswith("#") or ":" not in line:
+                    continue
+                key, value = line.split(":", 1)
+                key = key.strip()
+                value = value.strip()
+                if not key:
+                    continue
+                if value.lower() == "true":
+                    data[key] = True
+                elif value.lower() == "false":
+                    data[key] = False
+                elif value.lower() == "null":
+                    data[key] = None
+                elif re.fullmatch(r"-?\d+", value):
+                    data[key] = int(value)
+                else:
+                    data[key] = value.strip("\"'")
+    except (OSError, ValueError):
+        return data
+    return data
 
 
 def _maybe_json(value: Any) -> Any:

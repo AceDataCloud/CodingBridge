@@ -1,11 +1,14 @@
 import json
 
+import pytest
+
 from coding_bridge import history, protocol
 from coding_bridge.config import Settings
 from coding_bridge.connection import BridgeConnection
 from coding_bridge.protocol import Action, Event
 
 CODEX_SID = "11111111-1111-1111-1111-111111111111"
+COPILOT_SID = "44444444-4444-4444-4444-444444444444"
 
 
 def _write_jsonl(path, records):
@@ -128,23 +131,97 @@ def _patch_roots(monkeypatch, tmp_path):
     claude_root = tmp_path / "claude"
     codex_root = tmp_path / "codex"
     codex_index = tmp_path / "session_index.jsonl"
+    copilot_root = tmp_path / "copilot"
     _seed_claude(claude_root)
     _seed_codex(codex_root, codex_index)
+    _seed_copilot(copilot_root)
     monkeypatch.setattr(history, "CLAUDE_ROOT", claude_root)
     monkeypatch.setattr(history, "CODEX_ROOT", codex_root)
     monkeypatch.setattr(history, "CODEX_INDEX", codex_index)
+    monkeypatch.setattr(history, "COPILOT_ROOT", copilot_root)
+
+
+def _seed_copilot(root):
+    session_dir = root / COPILOT_SID
+    session_dir.mkdir(parents=True, exist_ok=True)
+    (session_dir / "workspace.yaml").write_text(
+        "\n".join(
+            [
+                f"id: {COPILOT_SID}",
+                "cwd: /home/me/copilot",
+                "client_name: github/acp",
+                "name: My Copilot Thread",
+                "user_named: false",
+                "summary_count: 0",
+                "created_at: 2025-06-03T08:00:00.000Z",
+                "updated_at: 2025-06-03T08:10:00.000Z",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    records = [
+        {
+            "type": "session.start",
+            "timestamp": "2025-06-03T08:00:00.000Z",
+            "data": {"sessionId": COPILOT_SID, "context": {"cwd": "/home/me/copilot"}},
+        },
+        {
+            "type": "session.model_change",
+            "timestamp": "2025-06-03T08:00:01.000Z",
+            "data": {"newModel": "gpt-5.4"},
+        },
+        {
+            "type": "user.message",
+            "timestamp": "2025-06-03T08:00:02.000Z",
+            "data": {"content": "fix the bridge"},
+        },
+        {
+            "type": "assistant.message",
+            "timestamp": "2025-06-03T08:00:03.000Z",
+            "data": {
+                "content": "",
+                "toolRequests": [
+                    {"toolCallId": "call1", "name": "bash", "arguments": {"command": "ls"}}
+                ],
+            },
+        },
+        {
+            "type": "tool.execution_start",
+            "timestamp": "2025-06-03T08:00:04.000Z",
+            "data": {"toolCallId": "call1", "toolName": "bash", "arguments": {"command": "ls"}},
+        },
+        {
+            "type": "tool.execution_complete",
+            "timestamp": "2025-06-03T08:00:05.000Z",
+            "data": {
+                "toolCallId": "call1",
+                "success": True,
+                "result": {"content": "file.txt"},
+            },
+        },
+        {
+            "type": "assistant.message",
+            "timestamp": "2025-06-03T08:00:06.000Z",
+            "data": {"content": "done", "model": "gpt-5.4"},
+        },
+    ]
+    _write_jsonl(session_dir / "events.jsonl", records)
 
 
 def test_list_sessions_includes_both_providers(monkeypatch, tmp_path):
     _patch_roots(monkeypatch, tmp_path)
     sessions = history.list_sessions()
     by_provider = {s["provider"]: s for s in sessions}
-    assert set(by_provider) == {"claude", "codex"}
+    assert set(by_provider) == {"claude", "codex", "copilot"}
     assert by_provider["claude"]["title"] == "hello world"
     assert by_provider["claude"]["message_count"] == 3
     assert by_provider["codex"]["title"] == "My Codex Thread"
     # developer-role messages are not counted as conversation.
     assert by_provider["codex"]["message_count"] == 2
+    assert by_provider["copilot"]["title"] == "My Copilot Thread"
+    # assistant tool-request scaffolding does not count as a chat message.
+    assert by_provider["copilot"]["message_count"] == 2
     timestamps = [s["updated_at"] for s in sessions]
     assert timestamps == sorted(timestamps, reverse=True)
 
@@ -176,6 +253,19 @@ def test_read_codex_session_filters_and_maps(monkeypatch, tmp_path):
     assert detail["events"][3]["content"] == "file.txt"
 
 
+def test_read_copilot_session_filters_and_maps(monkeypatch, tmp_path):
+    _patch_roots(monkeypatch, tmp_path)
+    detail = history.read_session("copilot", COPILOT_SID)
+    kinds = [e["kind"] for e in detail["events"]]
+    assert kinds == ["prompt", "tool_use", "tool_result", "text"]
+    assert detail["cwd"] == "/home/me/copilot"
+    assert detail["model"] == "gpt-5.4"
+    tool_use = detail["events"][1]
+    assert tool_use["tool"] == "bash"
+    assert tool_use["input"] == {"command": "ls"}
+    assert detail["events"][2]["content"] == "file.txt"
+
+
 def test_is_context_noise_detects_injections():
     noisy = [
         "# AGENTS.md instructions for /x",
@@ -204,6 +294,91 @@ def test_unwrap_ide_context_extracts_request():
     assert history._unwrap_user_text(wrapper) == "please refactor"
     assert history._unwrap_user_text("# Context from my IDE setup:\nno request") == ""
     assert history._unwrap_user_text("just a normal prompt") == "just a normal prompt"
+
+
+def test_unwrap_copilot_transformed_prompt():
+    # Copilot-specific tag stripping lives in _copilot_user_text, not the shared
+    # _unwrap_user_text (which codex also uses), so codex prompts aren't truncated.
+    wrapper = (
+        "<current_datetime>2026-07-02T00:54:54.203+08:00</current_datetime>\n\n"
+        "fix the bridge\n\n"
+        "<system_reminder>\n<sql_tables>Available tables: todos</sql_tables>\n</system_reminder>"
+    )
+    assert history._copilot_user_text({"transformedContent": wrapper}) == "fix the bridge"
+    # Shared unwrapper must leave a codex prompt ending in a tag intact.
+    assert history._unwrap_user_text(wrapper) == wrapper.strip()
+
+
+def test_copilot_read_tolerates_non_dict_event_data(monkeypatch, tmp_path):
+    # Malformed transcripts (data as a list/None) must not crash the reader.
+    copilot_root = tmp_path / "copilot"
+    session_dir = copilot_root / COPILOT_SID
+    session_dir.mkdir(parents=True, exist_ok=True)
+    (session_dir / "workspace.yaml").write_text(f"id: {COPILOT_SID}\n", encoding="utf-8")
+    (session_dir / "events.jsonl").write_text(
+        "\n".join(
+            [
+                json.dumps({"type": "user.message", "data": ["oops", "not", "a", "dict"]}),
+                json.dumps({"type": "assistant.message", "data": None}),
+                json.dumps({"type": "user.message", "data": {"content": "real prompt"}}),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(history, "COPILOT_ROOT", copilot_root)
+    detail = history.read_session("copilot", COPILOT_SID)
+    prompts = [e["text"] for e in detail["events"] if e["kind"] == "prompt"]
+    assert prompts == ["real prompt"]
+    summaries = history.list_sessions()
+    assert any(s["session_id"] == COPILOT_SID for s in summaries)
+
+
+def test_copilot_path_rejects_traversal(monkeypatch, tmp_path):
+    copilot_root = tmp_path / "copilot"
+    copilot_root.mkdir(parents=True, exist_ok=True)
+    # A stray events.jsonl one level up must NOT be reachable via `..`.
+    (copilot_root.parent / "events.jsonl").write_text("{}\n", encoding="utf-8")
+    monkeypatch.setattr(history, "COPILOT_ROOT", copilot_root)
+    assert history._copilot_path("..") is None
+    assert history._copilot_path(".") is None
+    with pytest.raises(FileNotFoundError):
+        history.read_session("copilot", "..")
+
+
+def test_copilot_falls_back_to_transformed_content(monkeypatch, tmp_path):
+    copilot_root = tmp_path / "copilot"
+    session_dir = copilot_root / COPILOT_SID
+    session_dir.mkdir(parents=True, exist_ok=True)
+    (session_dir / "workspace.yaml").write_text(f"id: {COPILOT_SID}\n", encoding="utf-8")
+    _write_jsonl(
+        session_dir / "events.jsonl",
+        [
+            {
+                "type": "user.message",
+                "timestamp": "2025-06-03T08:00:02.000Z",
+                "data": {
+                    "content": "",
+                    "transformedContent": (
+                        "<current_datetime>2026-07-02T00:54:54.203+08:00</current_datetime>\n\n"
+                        "show me recent sessions\n\n"
+                        "<system_reminder>\n"
+                        "<sql_tables>Available tables: todos</sql_tables>\n"
+                        "</system_reminder>"
+                    ),
+                },
+            }
+        ],
+    )
+    monkeypatch.setattr(history, "CLAUDE_ROOT", tmp_path / "none-claude")
+    monkeypatch.setattr(history, "CODEX_ROOT", tmp_path / "none-codex")
+    monkeypatch.setattr(history, "CODEX_INDEX", tmp_path / "none.jsonl")
+    monkeypatch.setattr(history, "COPILOT_ROOT", copilot_root)
+    copilot = next(s for s in history.list_sessions() if s["provider"] == "copilot")
+    assert copilot["title"] == "show me recent sessions"
+    detail = history.read_session("copilot", COPILOT_SID)
+    prompts = [e["text"] for e in detail["events"] if e["kind"] == "prompt"]
+    assert prompts == ["show me recent sessions"]
 
 
 def test_claude_skips_ide_noise_block_uses_real_prompt(monkeypatch, tmp_path):

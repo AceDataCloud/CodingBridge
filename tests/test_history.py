@@ -139,7 +139,6 @@ def _patch_roots(monkeypatch, tmp_path):
     monkeypatch.setattr(history, "CODEX_ROOT", codex_root)
     monkeypatch.setattr(history, "CODEX_INDEX", codex_index)
     monkeypatch.setattr(history, "COPILOT_ROOT", copilot_root)
-    monkeypatch.setattr(history, "VSCODE_CHAT_ROOTS", [tmp_path / "vscode"])
 
 
 def _seed_copilot(root):
@@ -375,7 +374,6 @@ def test_copilot_falls_back_to_transformed_content(monkeypatch, tmp_path):
     monkeypatch.setattr(history, "CODEX_ROOT", tmp_path / "none-codex")
     monkeypatch.setattr(history, "CODEX_INDEX", tmp_path / "none.jsonl")
     monkeypatch.setattr(history, "COPILOT_ROOT", copilot_root)
-    monkeypatch.setattr(history, "VSCODE_CHAT_ROOTS", [tmp_path / "none-vscode"])
     copilot = next(s for s in history.list_sessions() if s["provider"] == "copilot")
     assert copilot["title"] == "show me recent sessions"
     detail = history.read_session("copilot", COPILOT_SID)
@@ -601,107 +599,3 @@ async def test_dispatch_history_get_requires_params():
     await conn._dispatch({"action": Action.HISTORY_GET})
     errors = _payloads(conn, Event.SESSION_ERROR)
     assert errors and "required" in errors[0]["message"]
-
-
-VSCODE_SID = "55555555-5555-5555-5555-555555555555"
-
-
-def _seed_vscode_chat(storage_root):
-    ws = storage_root / "abc123hash"
-    (ws / "chatSessions").mkdir(parents=True, exist_ok=True)
-    (ws / "workspace.json").write_text(
-        json.dumps({"folder": "file:///Users/me/My%20Proj"}), encoding="utf-8"
-    )
-    # v3 delta log: header line then a kind:2 line carrying the request objects.
-    records = [
-        {"kind": 0, "v": {"version": 3, "sessionId": VSCODE_SID, "requests": []}},
-        {
-            "kind": 2,
-            "v": [
-                {
-                    "requestId": "req_1",
-                    "timestamp": 1750000000000,
-                    "modelId": "copilot/claude-opus-4.8",
-                    "message": {"text": "fix the parser"},
-                    "response": [
-                        {"kind": "thinking", "value": "let me look", "id": "t0"},
-                        {"value": "Here is the fix.", "supportThemeIcons": False},
-                        {
-                            "kind": "toolInvocationSerialized",
-                            "toolId": "copilot_readFile",
-                            "toolCallId": "call_1",
-                            "invocationMessage": {"value": "Reading file"},
-                            "isComplete": True,
-                        },
-                    ],
-                }
-            ],
-        },
-    ]
-    _write_jsonl(ws / "chatSessions" / f"{VSCODE_SID}.jsonl", records)
-
-
-def test_vscode_chat_list_and_read(monkeypatch, tmp_path):
-    storage = tmp_path / "workspaceStorage"
-    _seed_vscode_chat(storage)
-    monkeypatch.setattr(history, "VSCODE_CHAT_ROOTS", [storage])
-    monkeypatch.setattr(history, "CLAUDE_ROOT", tmp_path / "none1")
-    monkeypatch.setattr(history, "CODEX_ROOT", tmp_path / "none2")
-    monkeypatch.setattr(history, "COPILOT_ROOT", tmp_path / "none3")
-
-    sessions = history.list_sessions()
-    vs = [s for s in sessions if s["session_id"] == VSCODE_SID]
-    assert len(vs) == 1
-    s = vs[0]
-    assert s["provider"] == "copilot"  # surfaced as ordinary Copilot, no "vscode"
-    assert "origin" not in s
-    assert s["title"] == "fix the parser"
-    assert s["cwd"] == "/Users/me/My Proj"  # file:// unquoted
-
-    detail = history.read_session("copilot", VSCODE_SID)
-    assert "origin" not in detail
-    assert detail["model"] == "copilot/claude-opus-4.8"
-    kinds = [e["kind"] for e in detail["events"]]
-    assert kinds == ["prompt", "thinking", "text", "tool_use"]
-    assert detail["events"][0]["text"] == "fix the parser"
-    assert detail["events"][2]["text"] == "Here is the fix."
-    assert detail["events"][3]["tool"] == "copilot_readFile"
-
-
-def test_vscode_chat_path_rejects_traversal(monkeypatch, tmp_path):
-    storage = tmp_path / "workspaceStorage"
-    storage.mkdir(parents=True, exist_ok=True)
-    monkeypatch.setattr(history, "VSCODE_CHAT_ROOTS", [storage])
-    monkeypatch.setattr(history, "COPILOT_ROOT", tmp_path / "none")
-    assert history._vscode_chat_path("..") is None
-    assert history._vscode_chat_path(".") is None
-    with pytest.raises(FileNotFoundError):
-        history.read_session("copilot", "..")
-
-
-def test_vscode_chat_tolerates_malformed(monkeypatch, tmp_path):
-    storage = tmp_path / "workspaceStorage"
-    ws = storage / "h" / "chatSessions"
-    ws.mkdir(parents=True, exist_ok=True)
-    (ws / f"{VSCODE_SID}.jsonl").write_text(
-        "\n".join(
-            [
-                "not json",
-                json.dumps({"kind": 1, "v": "just a string"}),
-                json.dumps({"kind": 2, "v": [{"message": ["bad"], "response": []}]}),
-                json.dumps(
-                    {
-                        "kind": 2,
-                        "v": [{"requestId": "r", "message": {"text": "real"}, "response": []}],
-                    }
-                ),
-            ]
-        )
-        + "\n",
-        encoding="utf-8",
-    )
-    monkeypatch.setattr(history, "VSCODE_CHAT_ROOTS", [storage])
-    monkeypatch.setattr(history, "COPILOT_ROOT", tmp_path / "none")
-    detail = history.read_session("copilot", VSCODE_SID)
-    prompts = [e["text"] for e in detail["events"] if e["kind"] == "prompt"]
-    assert prompts == ["real"]

@@ -20,7 +20,6 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
 from typing import Any
-from urllib.parse import unquote, urlparse
 
 # Module-level roots so tests can point them at fixtures via monkeypatch.
 CLAUDE_ROOT = Path.home() / ".claude" / "projects"
@@ -29,33 +28,6 @@ CODEX_INDEX = Path.home() / ".codex" / "session_index.jsonl"
 COPILOT_ROOT = (
     Path(os.environ.get("COPILOT_HOME") or str(Path.home() / ".copilot")) / "session-state"
 )
-
-
-def _vscode_chat_roots() -> list[Path]:
-    """Candidate ``workspaceStorage`` dirs for VS Code Copilot Chat transcripts.
-
-    Chat sessions live at ``<storage>/<workspace-hash>/chatSessions/<id>.jsonl``.
-    ``VSCODE_CHAT_HOME`` overrides for tests / non-standard installs.
-    """
-    override = os.environ.get("VSCODE_CHAT_HOME")
-    if override:
-        return [Path(override)]
-    home = Path.home()
-    bases: list[Path | None] = [
-        home / "Library" / "Application Support",  # macOS
-        Path(os.environ["APPDATA"]) if os.environ.get("APPDATA") else None,  # Windows
-        home / ".config",  # Linux
-    ]
-    apps = ("Code", "Code - Insiders", "VSCodium", "Cursor")
-    roots: list[Path] = []
-    for base in bases:
-        if base is None:
-            continue
-        roots.extend(base / app / "User" / "workspaceStorage" for app in apps)
-    return roots
-
-
-VSCODE_CHAT_ROOTS = _vscode_chat_roots()
 
 _TITLE_MAX = 80
 _DETAIL_MAX_EVENTS = 4000
@@ -70,14 +42,9 @@ _UUID_RE = re.compile(
 
 # --- public API ------------------------------------------------------------
 def list_sessions(limit: int = 200) -> list[dict[str, Any]]:
-    """Return session summaries from every provider, newest first."""
+    """Return session summaries from both providers, newest first."""
     limit = max(1, min(int(limit or 200), 1000))
-    sessions = (
-        _list_claude(limit)
-        + _list_codex(limit)
-        + _list_copilot(limit)
-        + _list_vscode_chat(limit)
-    )
+    sessions = _list_claude(limit) + _list_codex(limit) + _list_copilot(limit)
     sessions.sort(key=lambda s: s.get("updated_at") or 0, reverse=True)
     return sessions[:limit]
 
@@ -144,17 +111,10 @@ def read_session(provider: str, session_id: str) -> dict[str, Any]:
             raise FileNotFoundError(f"codex session not found: {session_id}")
         header, events = _codex_read(path, _codex_index())
     elif provider == "copilot":
-        # A "copilot" session may live in the CLI store or the VS Code Copilot
-        # Chat store — both are Copilot to the user. Prefer the CLI store, fall
-        # back to the VS Code panel transcript.
         path = _copilot_path(session_id)
-        if path is not None:
-            header, events = _copilot_read(path)
-        else:
-            vpath = _vscode_chat_path(session_id)
-            if vpath is None:
-                raise FileNotFoundError(f"copilot session not found: {session_id}")
-            header, events = _vscode_chat_read(vpath)
+        if path is None:
+            raise FileNotFoundError(f"copilot session not found: {session_id}")
+        header, events = _copilot_read(path)
     else:
         raise ValueError(f"unknown provider: {provider}")
     # Keep the MOST RECENT events when a transcript is huge — the tail is the
@@ -663,160 +623,6 @@ def _copilot_tool_result_text(data: dict[str, Any]) -> Any:
     if isinstance(error, dict) and error.get("message") is not None:
         return _stringify(error.get("message"))
     return _stringify(error)
-
-
-# --- VS Code Copilot Chat --------------------------------------------------
-# The panel stores each session as an append-only delta log of `{kind, v}` lines
-# (format v3). We don't replay the deltas; we recursively find the request
-# objects (dict with `message.text` + `response`), which is resilient to delta
-# opcode changes across VS Code releases. These are surfaced as ordinary
-# `copilot` sessions (same backend); read-only, so continuing makes a copy.
-def _list_vscode_chat(limit: int) -> list[dict[str, Any]]:
-    files: list[Path] = []
-    for root in VSCODE_CHAT_ROOTS:
-        if root.exists():
-            files.extend(root.glob("*/chatSessions/*.jsonl"))
-    files = sorted(files, key=_safe_mtime, reverse=True)[:limit]
-    return _summaries(files, _vscode_chat_summary)
-
-
-def _vscode_collect_requests(obj: Any, out: list[dict[str, Any]]) -> None:
-    """Collect chat-request objects, pruning descent into the huge `response`."""
-    if isinstance(obj, dict):
-        msg = obj.get("message")
-        if isinstance(msg, dict) and "text" in msg and "response" in obj:
-            out.append(obj)
-            return  # don't recurse into this request's response array
-        for value in obj.values():
-            _vscode_collect_requests(value, out)
-    elif isinstance(obj, list):
-        for value in obj:
-            _vscode_collect_requests(value, out)
-
-
-def _vscode_requests(path: Path) -> list[dict[str, Any]]:
-    seen: dict[str, dict[str, Any]] = {}
-    ordered: list[dict[str, Any]] = []
-    for rec in _iter_jsonl(path):
-        found: list[dict[str, Any]] = []
-        _vscode_collect_requests(rec.get("v"), found)
-        for req in found:
-            rid = req.get("requestId")
-            key = rid if isinstance(rid, str) else str(id(req))
-            if key not in seen:
-                seen[key] = req
-                ordered.append(req)
-    ordered.sort(key=lambda r: r.get("timestamp") or 0)
-    return ordered
-
-
-def _vscode_user_text(req: dict[str, Any]) -> str:
-    msg = req.get("message")
-    text = msg.get("text") if isinstance(msg, dict) else None
-    return text.strip() if isinstance(text, str) else ""
-
-
-def _vscode_chat_summary(path: Path) -> dict[str, Any]:
-    reqs = _vscode_requests(path)
-    title = ""
-    updated_at = _mtime_ms(path)
-    for req in reqs:
-        ts = req.get("timestamp")
-        if isinstance(ts, int):
-            updated_at = max(updated_at, ts)
-        if not title:
-            text = _vscode_user_text(req)
-            if text and not _is_context_noise(text):
-                title = _clean_title(text)
-    return {
-        "provider": "copilot",
-        "session_id": path.stem,
-        "title": title or "(no prompt)",
-        "cwd": _vscode_cwd(path),
-        "git_branch": None,
-        "updated_at": updated_at,
-        "message_count": len(reqs),
-    }
-
-
-def _vscode_chat_read(path: Path) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-    header: dict[str, Any] = {
-        "cwd": _vscode_cwd(path),
-        "git_branch": None,
-        "model": None,
-        "title": "",
-    }
-    events: list[dict[str, Any]] = []
-    for req in _vscode_requests(path):
-        ts = req.get("timestamp") if isinstance(req.get("timestamp"), int) else None
-        model = req.get("modelId")
-        if header["model"] is None and isinstance(model, str) and model:
-            header["model"] = model
-        text = _vscode_user_text(req)
-        if text and not _is_context_noise(text):
-            events.append({"kind": "prompt", "text": text, "ts": ts})
-            if not header["title"]:
-                header["title"] = _clean_title(text)
-        _vscode_response_events(req.get("response"), ts, events)
-    return header, events
-
-
-def _vscode_response_events(response: Any, ts: int | None, events: list[dict[str, Any]]) -> None:
-    if not isinstance(response, list):
-        return
-    for part in response:
-        if not isinstance(part, dict):
-            continue
-        kind = part.get("kind")
-        if kind is None:  # markdown text block: {"value": "...", ...}
-            value = part.get("value")
-            text = value.get("value") if isinstance(value, dict) else value
-            if isinstance(text, str) and text.strip():
-                events.append({"kind": "text", "text": text, "ts": ts})
-        elif kind == "thinking":
-            value = part.get("value")
-            if isinstance(value, str) and value.strip():
-                events.append({"kind": "thinking", "text": value, "ts": ts})
-        elif kind == "toolInvocationSerialized":
-            msg = part.get("pastTenseMessage") or part.get("invocationMessage")
-            label = msg.get("value") if isinstance(msg, dict) else msg
-            events.append(
-                {
-                    "kind": "tool_use",
-                    "tool": part.get("toolId"),
-                    "tool_use_id": part.get("toolCallId"),
-                    "input": label if isinstance(label, str) else None,
-                    "ts": ts,
-                }
-            )
-
-
-def _vscode_chat_path(session_id: str) -> Path | None:
-    if not _safe_id(session_id) or session_id in (".", ".."):
-        return None
-    matches: list[Path] = []
-    for root in VSCODE_CHAT_ROOTS:
-        if root.exists():
-            matches.extend(root.glob(f"*/chatSessions/{session_id}.jsonl"))
-    matches = [p for p in matches if p.is_file()]
-    return max(matches, key=_safe_mtime) if matches else None
-
-
-def _vscode_cwd(path: Path) -> str | None:
-    # chatSessions/<id>.jsonl -> workspace.json sits two levels up (workspace hash dir)
-    meta = path.parent.parent / "workspace.json"
-    try:
-        data = json.loads(meta.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError, ValueError):
-        return None
-    folder = data.get("folder") if isinstance(data, dict) else None
-    if isinstance(folder, str) and folder.startswith("file://"):
-        path = unquote(urlparse(folder).path)
-        # Windows file URLs parse to "/C:/..." — drop the spurious leading slash.
-        if re.match(r"^/[A-Za-z]:/", path):
-            path = path[1:]
-        return path or None
-    return folder if isinstance(folder, str) and folder else None
 
 
 # --- shared helpers --------------------------------------------------------

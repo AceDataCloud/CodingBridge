@@ -131,6 +131,54 @@ def claude_user_uuid_after(session_id: str, cut_uuid: str | None) -> str | None:
     return None
 
 
+# Cap the seeded transcript so continuing a huge conversation doesn't blow the
+# first prompt; keep the most recent turns (the live context).
+_SEED_MAX_CHARS = 40000
+
+
+def copilot_native(session_id: str) -> bool:
+    """True if a Copilot session id belongs to the CLI store (natively resumable).
+
+    VS Code Copilot Chat sessions live in a different store the CLI can't resume,
+    so they must be continued by seeding the transcript into a fresh session.
+    """
+    return _copilot_path(session_id) is not None
+
+
+def build_seed(session_id: str) -> str:
+    """Render a Copilot transcript as a compact preamble to continue it elsewhere.
+
+    Used when a session can't be natively resumed (e.g. a VS Code Copilot Chat
+    session continued from the phone): the prior user/assistant turns are replayed
+    as context in a fresh session. Tool calls and thinking are omitted; only typed
+    prompts and assistant text are kept, tail-capped at ``_SEED_MAX_CHARS``.
+    """
+    try:
+        detail = read_session("copilot", session_id)
+    except (FileNotFoundError, OSError, ValueError):
+        return ""
+    lines: list[str] = []
+    for event in detail.get("events", []):
+        kind = event.get("kind")
+        text = event.get("text")
+        if not isinstance(text, str) or not text.strip():
+            continue
+        if kind == "prompt":
+            lines.append(f"User: {text.strip()}")
+        elif kind == "text":
+            lines.append(f"Assistant: {text.strip()}")
+    if not lines:
+        return ""
+    body = "\n\n".join(lines)
+    if len(body) > _SEED_MAX_CHARS:
+        body = "…(earlier turns omitted)…\n\n" + body[-_SEED_MAX_CHARS:]
+    return (
+        "[Continuing a previous conversation. Transcript so far:]\n\n"
+        + body
+        + "\n\n[End of previous transcript — continue from here.]"
+    )
+
+
 def read_session(provider: str, session_id: str) -> dict[str, Any]:
     """Return a normalised transcript ``{provider,title,cwd,model,...,events}``."""
     if provider == "claude":

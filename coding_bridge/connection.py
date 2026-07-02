@@ -334,6 +334,16 @@ class BridgeConnection:
                 **_session_overrides(payload),
             )
             return
+        resume = payload.get("resume_session_id") or None
+        prompt = payload.get("prompt", "")
+        # Continue a Copilot session the CLI can't natively resume (e.g. a VS Code
+        # Copilot Chat session opened from history): seed its transcript into a
+        # fresh session instead of a doomed session/resume.
+        if provider == "copilot" and resume and not history.copilot_native(resume):
+            seed = await asyncio.to_thread(history.build_seed, resume)
+            if seed:
+                prompt = f"{seed}\n\n{prompt}".strip() if prompt else seed
+            resume = None
         session = Session(
             session_id,
             self.provider_factory,
@@ -344,14 +354,12 @@ class BridgeConnection:
             permission_mode=payload.get("permission_mode") or "default",
             provider=provider,
             effort=payload.get("effort") or None,
-            resume=payload.get("resume_session_id") or None,
+            resume=resume,
             trace_id=payload.get("trace_id"),
             on_rekey=self._rekey_session,
         )
         self.sessions[session_id] = session
-        await session.start(
-            payload.get("prompt", ""), payload.get("images"), payload.get("attachments")
-        )
+        await session.start(prompt, payload.get("images"), payload.get("attachments"))
 
     def _session(self, session_id: str | None) -> Session | None:
         """Resolve a session by its canonical id or a still-live provisional alias."""

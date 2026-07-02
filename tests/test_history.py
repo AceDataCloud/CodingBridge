@@ -705,3 +705,62 @@ def test_vscode_chat_tolerates_malformed(monkeypatch, tmp_path):
     detail = history.read_session("copilot", VSCODE_SID)
     prompts = [e["text"] for e in detail["events"] if e["kind"] == "prompt"]
     assert prompts == ["real"]
+
+
+def test_copilot_native_and_build_seed(monkeypatch, tmp_path):
+    # A VS Code chat session is NOT natively resumable but seeds fine.
+    storage = tmp_path / "workspaceStorage"
+    _seed_vscode_chat(storage)
+    monkeypatch.setattr(history, "VSCODE_CHAT_ROOTS", [storage])
+    monkeypatch.setattr(history, "COPILOT_ROOT", tmp_path / "none")
+
+    assert history.copilot_native(VSCODE_SID) is False
+    seed = history.build_seed(VSCODE_SID)
+    assert "User: fix the parser" in seed
+    assert "Assistant: Here is the fix." in seed
+    assert seed.startswith("[Continuing a previous conversation")
+    assert seed.rstrip().endswith("continue from here.]")
+    # tool_use / thinking are omitted from the seed
+    assert "copilot_readFile" not in seed
+    assert "let me look" not in seed
+
+
+def test_build_seed_missing_returns_empty(monkeypatch, tmp_path):
+    monkeypatch.setattr(history, "VSCODE_CHAT_ROOTS", [tmp_path / "none-vs"])
+    monkeypatch.setattr(history, "COPILOT_ROOT", tmp_path / "none-cli")
+    assert history.build_seed("00000000-0000-0000-0000-000000000000") == ""
+
+
+def test_build_seed_tail_caps(monkeypatch, tmp_path):
+    storage = tmp_path / "workspaceStorage"
+    ws = storage / "h" / "chatSessions"
+    ws.mkdir(parents=True, exist_ok=True)
+    big = "x" * 60000
+    _write_jsonl(
+        ws / f"{VSCODE_SID}.jsonl",
+        [
+            {
+                "kind": 2,
+                "v": [
+                    {
+                        "requestId": "r1",
+                        "timestamp": 1,
+                        "message": {"text": "early turn " + big},
+                        "response": [{"value": "ok"}],
+                    },
+                    {
+                        "requestId": "r2",
+                        "timestamp": 2,
+                        "message": {"text": "latest question"},
+                        "response": [{"value": "latest answer"}],
+                    },
+                ],
+            }
+        ],
+    )
+    monkeypatch.setattr(history, "VSCODE_CHAT_ROOTS", [storage])
+    monkeypatch.setattr(history, "COPILOT_ROOT", tmp_path / "none")
+    seed = history.build_seed(VSCODE_SID)
+    assert len(seed) < 45000  # capped
+    assert "latest question" in seed  # tail kept
+    assert "omitted" in seed

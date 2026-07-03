@@ -67,6 +67,13 @@ code. Once claimed, the daemon stores a node token at
 Subsequent runs reuse the stored token, so `coding-bridge up` just
 connects.
 
+### Running as a background service
+
+To keep the daemon (or the `coding-bridge channels start` chat bridge) running
+across logout and reboot, install it as an OS service. Copy-paste templates for
+each platform are in [docs/deploy/](docs/deploy/README.md): systemd (Linux),
+Task Scheduler / NSSM (Windows), and launchd (macOS).
+
 ## Commands
 
 | Command   | What it does                                              |

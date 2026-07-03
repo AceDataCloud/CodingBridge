@@ -134,6 +134,13 @@ def test_toml_escapes_quotes(tmp_path):
     assert back.wechat[0].allowed_senders == ('weird"id', "a\\b")
 
 
+def test_toml_roundtrip_allowed_groups(tmp_path):
+    cfg = ChannelsConfig(wechat=(_inst(allowed_groups=("g1@chatroom", "g2@chatroom")),))
+    path = tmp_path / "channels.toml"
+    path.write_text(dump_channels_toml(cfg), encoding="utf-8")
+    assert load_channels_config(path).wechat[0].allowed_groups == ("g1@chatroom", "g2@chatroom")
+
+
 # --------------------------------------------------------------------------- #
 # PortalService — config
 # --------------------------------------------------------------------------- #
@@ -190,6 +197,24 @@ def test_save_free_form_clears_prefix(tmp_path, monkeypatch):
     )
     assert result["instances"][0]["trigger_prefix"] == ""
     assert result["instances"][0]["free_form"] is True
+    svc.close()
+
+
+def test_save_persists_allowed_groups(tmp_path, monkeypatch):
+    svc, _ = _service(tmp_path, monkeypatch, seed=False)
+    result = svc.save(
+        [
+            {
+                "instance_id": "b",
+                "base_url": "http://gw",
+                "token_env": "WT",
+                "allowed_groups": ["team@chatroom", ""],  # empty dropped
+            }
+        ]
+    )
+    assert result["instances"][0]["allowed_groups"] == ["team@chatroom"]
+    reloaded = load_channels_config(tmp_path / "channels.toml")
+    assert reloaded.wechat[0].allowed_groups == ("team@chatroom",)
     svc.close()
 
 

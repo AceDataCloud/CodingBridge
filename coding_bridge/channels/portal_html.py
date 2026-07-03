@@ -227,10 +227,10 @@ function render(){
   beh.append(rl);
   app.append(beh);
 
-  // groups (read-only context)
+  // groups — allowed_groups picker
   const g=el("div",{class:"card"},
-    el("h2",{},"Groups your bot is in"),
-    el("p",{class:"hint"},"For context. In groups, keep a prefix so the bot only answers when addressed. (Per-group rules are coming soon.)"),
+    el("h2",{},"Groups — where the bot may answer"),
+    el("p",{class:"hint"},"Check groups to restrict the bot to only those. None checked = it may answer in every group it's in (still gated by prefix/sender). Keep a prefix in busy groups."),
     el("div",{class:"grouplist",id:"groups"}, el("div",{class:"empty"},"loading…")));
   app.append(g);
 }
@@ -294,8 +294,16 @@ async function loadGroups(){
     const d=await api("/api/wechat/groups?instance="+encodeURIComponent(it.instance_id));
     box.innerHTML="";
     if(!d.groups.length){ box.append(el("div",{class:"empty"},"bot is not in any group")); return; }
-    d.groups.forEach(g=>box.append(el("div",{class:"grp"}, avatar(g.avatar_url,g.name,"sm"),
-      el("div",{}, el("div",{class:"nm"},g.name)))));
+    d.groups.forEach(gr=>{
+      const on=it.allowed_groups.includes(gr.id);
+      const cb=el("input",{type:"checkbox",style:"width:auto;accent-color:var(--accent)",...(on?{checked:"checked"}:{})});
+      cb.addEventListener("change",()=>{
+        if(cb.checked){ if(!it.allowed_groups.includes(gr.id)) it.allowed_groups.push(gr.id); }
+        else { it.allowed_groups=it.allowed_groups.filter(x=>x!==gr.id); }
+      });
+      box.append(el("label",{class:"grp",style:"cursor:pointer"}, cb,
+        avatar(gr.avatar_url,gr.name,"sm"), el("div",{}, el("div",{class:"nm"},gr.name))));
+    });
   }catch(e){ box.innerHTML=""; box.append(el("div",{class:"empty"},String(e.message))); }
 }
 
@@ -310,6 +318,7 @@ async function save(){
       free_form: it.free_form===true || it.trigger_prefix==="",
       trigger_prefix: it.trigger_prefix,
       allowed_senders: it.allowed_senders,
+      allowed_groups: it.allowed_groups,
       rate_limit_per_min: it.rate_limit_per_min,
       dedup_window_seconds: it.dedup_window_seconds}))};
     const res=await api("/api/config",{method:"POST",body:JSON.stringify(payload)});

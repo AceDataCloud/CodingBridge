@@ -109,6 +109,8 @@ def _dump_instance(inst: WeChatInstanceConfig) -> str:
     lines.append(f"trigger_prefix = {_toml_str(inst.trigger_prefix)}")
     senders = ", ".join(_toml_str(s) for s in inst.allowed_senders)
     lines.append(f"allowed_senders = [{senders}]")
+    groups = ", ".join(_toml_str(s) for s in inst.allowed_groups)
+    lines.append(f"allowed_groups = [{groups}]")
     lines.append(f"rate_limit_per_min = {inst.rate_limit_per_min}")
     # repr() on a float always yields a TOML-valid float literal (keeps the dot).
     lines.append(f"dedup_window_seconds = {inst.dedup_window_seconds!r}")
@@ -168,6 +170,7 @@ def _instance_public(inst: WeChatInstanceConfig, *, resolvable: bool) -> dict[st
         "trigger_prefix": inst.trigger_prefix,
         "free_form": inst.trigger_prefix == "",
         "allowed_senders": list(inst.allowed_senders),
+        "allowed_groups": list(inst.allowed_groups),
         "rate_limit_per_min": inst.rate_limit_per_min,
         "dedup_window_seconds": inst.dedup_window_seconds,
     }
@@ -369,6 +372,9 @@ def _instance_from_payload(item: dict[str, Any]) -> dict[str, Any]:
     senders = item.get("allowed_senders")
     if isinstance(senders, list):
         block["allowed_senders"] = [s for s in senders if isinstance(s, str) and s]
+    groups = item.get("allowed_groups")
+    if isinstance(groups, list):
+        block["allowed_groups"] = [s for s in groups if isinstance(s, str) and s]
     if isinstance(item.get("rate_limit_per_min"), int) and not isinstance(
         item.get("rate_limit_per_min"), bool
     ):

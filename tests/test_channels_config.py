@@ -398,6 +398,52 @@ class TestResolveToken:
         with pytest.raises(ConfigError, match=r"exceeds .*-byte limit"):
             inst.resolve_token({})
 
+
+class TestAllowedGroups:
+    def test_parses_and_flows_to_policy(self, tmp_path: Path) -> None:
+        p = _write(
+            tmp_path,
+            """
+[[channels.wechat]]
+instance_id = "x"
+base_url = "http://a"
+token_env = "T"
+allowed_groups = ["team@chatroom", "vip@chatroom"]
+""",
+        )
+        inst = load_channels_config(p).wechat[0]
+        assert inst.allowed_groups == ("team@chatroom", "vip@chatroom")
+        assert inst.to_policy().allowed_groups == ("team@chatroom", "vip@chatroom")
+
+    def test_default_is_empty(self, tmp_path: Path) -> None:
+        p = _write(
+            tmp_path,
+            """
+[[channels.wechat]]
+instance_id = "x"
+base_url = "http://a"
+token_env = "T"
+""",
+        )
+        assert load_channels_config(p).wechat[0].allowed_groups == ()
+
+    def test_non_string_entries_rejected(self) -> None:
+        with pytest.raises(ConfigError, match=r"allowed_groups must be a list"):
+            parse_channels_config(
+                {
+                    "channels": {
+                        "wechat": [
+                            {
+                                "instance_id": "x",
+                                "base_url": "http://a",
+                                "token_env": "T",
+                                "allowed_groups": ["ok", 123],
+                            }
+                        ]
+                    }
+                }
+            )
+
     def test_empty_file_raises(self, tmp_path: Path) -> None:
         f = tmp_path / "tok"
         f.write_text("   \n\n", encoding="utf-8")

@@ -10,11 +10,14 @@ Enforced (in this order, cheapest to most-expensive):
    prefix (default ``"/ask "``) so a bot in a group chat only responds when
    explicitly addressed. Prefix is stripped before the message is forwarded.
    Empty string → prefix check disabled.
-2. **Sender allowlist** — if ``allowed_senders`` is non-empty, only those
+2. **Group allowlist** — if ``allowed_groups`` is non-empty, a message from a
+   group chat is dropped unless its conversation id is listed. Only affects
+   group chats; 1:1 DMs always pass. Empty list → every group allowed.
+3. **Sender allowlist** — if ``allowed_senders`` is non-empty, only those
    ``sender_id`` values are accepted. Empty list → allow all (rely on
    ``token`` for auth; useful when only the account owner can reach the
    WeChat gateway endpoint anyway).
-3. **Per-sender rate limit** — sliding-window: at most ``rate_limit_per_min``
+4. **Per-sender rate limit** — sliding-window: at most ``rate_limit_per_min``
    messages from one ``sender_id`` in the last 60 s. Default 6/min.
 
 Every rejection is logged at INFO with a stable ``reason`` code so operators
@@ -45,6 +48,11 @@ class ChannelPolicy:
 
     #: Sender IDs that may talk to this bot. Empty tuple = allow all.
     allowed_senders: tuple[str, ...] = ()
+
+    #: Group conversation IDs the bot may answer in. Empty tuple = every group
+    #: is allowed (still gated by prefix/sender). Only restricts group chats;
+    #: private 1:1 DMs are never filtered by this.
+    allowed_groups: tuple[str, ...] = ()
 
     #: Per-sender sliding window: at most this many messages per 60 s.
     rate_limit_per_min: int = 6
@@ -125,13 +133,24 @@ class PolicyGate:
                 self._reject(adapter, msg, "empty_after_prefix")
                 return
 
-        # (2) sender allowlist
+        # (2) group allowlist — only restricts group chats; 1:1 DMs are never
+        # filtered here (a DM's conversation_type is not "group").
+        groups = self._policy.allowed_groups
+        if (
+            groups
+            and msg.target.conversation_type == "group"
+            and msg.target.conversation_id not in groups
+        ):
+            self._reject(adapter, msg, "group_not_allowed")
+            return
+
+        # (3) sender allowlist
         allowed = self._policy.allowed_senders
         if allowed and msg.sender_id not in allowed:
             self._reject(adapter, msg, "sender_not_allowed")
             return
 
-        # (3+4) rate limit + dedup share the lock so a burst can't race
+        # (4+5) rate limit + dedup share the lock so a burst can't race
         async with self._lock:
             # dedup
             if self._policy.dedup_window_seconds > 0 and msg.upstream_id:
@@ -160,7 +179,7 @@ class PolicyGate:
                     self._reject(adapter, msg, "rate_limited")
                     return
 
-        # (5) forward to dispatcher — strip prefix out of the payload
+        # (6) forward to dispatcher — strip prefix out of the payload
         forwarded = replace(msg, text=text)
         try:
             await self._downstream(forwarded, adapter)

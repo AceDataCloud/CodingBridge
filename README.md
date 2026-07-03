@@ -94,20 +94,24 @@ Run flags (`up` / `run`):
 
 Global flags: `--bridge-url`, `--name`, `--config-dir`.
 
-## Chat channels (WeChat)
+## Chat channels (WeChat & Telegram)
 
-Besides the browser/Nexior front-end, the daemon can be driven from a **personal
-WeChat account**: message the account and each message runs one Claude Code or
-Codex turn whose reply is sent straight back into the chat — handy for kicking
-off and steering tasks from your phone.
+Besides the browser/Nexior front-end, the daemon can be driven from a **chat
+account** — message it and each message runs one Claude Code or Codex turn whose
+reply is sent straight back into the chat, handy for kicking off and steering
+tasks from your phone. Two channels ship today and run side by side:
 
-A small **WeChat gateway** (a separate service you run, e.g. on a CVM) bridges
-WeChat and this daemon. The daemon connects _outbound_ to the gateway over a
-WebSocket, so — exactly like the relay path — it opens no listening ports and
-your code still only ever runs on your machine.
+- **WeChat** — via a small self-hosted gateway (below).
+- **Telegram** — via a bot you create with [@BotFather](https://t.me/BotFather),
+  talking to the official Bot API directly (no gateway to run).
+
+Both connect **outbound only** — like the relay path they open no listening
+ports, and your code still only ever runs on your machine.
 
 ```
-WeChat  ⇄  WeChat gateway  ⇄ (wss, outbound) ⇄  coding-bridge  ─►  Claude Code / Codex
+WeChat    ⭢  WeChat gateway  ⭢ (wss, outbound) ⭢
+                                                 ├─►  coding-bridge  ─►  Claude Code / Codex
+Telegram  ⭢  Bot API (getUpdates long-poll) ⭢───┘
 ```
 
 ### Setup
@@ -169,13 +173,13 @@ coding-bridge channels start    # connect and serve until Ctrl-C
 | Command  | What it does                                                       |
 | -------- | ------------------------------------------------------------------ |
 | `init`   | Write a skeleton `channels.toml` (refuses to overwrite)            |
-| `doctor` | Validate `channels.toml` and ping every enabled gateway endpoint   |
+| `doctor` | Validate `channels.toml` and ping every enabled channel            |
 | `smoke`  | Run one real provider turn locally to prove your provider works    |
-| `start`  | Connect to each enabled gateway and serve replies until Ctrl-C     |
+| `start`  | Connect to each enabled channel and serve replies until Ctrl-C     |
 | `portal` | Open a local web UI to edit `channels.toml` (pick admins, trigger mode) |
 
 After that one-time setup, day-to-day use is a **single command** —
-`coding-bridge channels start` — and you steer everything from WeChat.
+`coding-bridge channels start` — and you steer everything from WeChat or Telegram.
 
 `channels smoke` flags: `--provider {claude,codex,copilot}` (default `claude`),
 `--prompt` (default `"Reply with the single word: pong"`), `--timeout` seconds
@@ -183,6 +187,44 @@ After that one-time setup, day-to-day use is a **single command** —
 
 To keep `channels start` running across logout/reboot, install it as a service —
 templates in [docs/deploy/](docs/deploy/README.md).
+
+### Telegram
+
+Telegram needs no gateway — create a bot and point the daemon at it:
+
+1. Message [@BotFather](https://t.me/BotFather), send `/newbot`, and copy the
+   **bot token** it gives you.
+2. Add a `[[channels.telegram]]` block to `~/.ace-bridge/channels.toml`
+   (`coding-bridge channels init` writes a commented example):
+
+```toml
+[[channels.telegram]]
+instance_id = "my-telegram"                 # unique per instance
+token_env = "TELEGRAM_TOKEN_MY_TELEGRAM"    # env var holding the bot token (never the token itself)
+enabled = true                              # explicit opt-in
+require_approval = false                    # true = hold tool use for Approve/Deny in the portal
+
+trigger_prefix = "/ask "                    # prefix to require; "" = reply to every message
+allowed_senders = ["123456789"]             # numeric Telegram user ids; empty = allow all
+allowed_groups = []                         # group/supergroup chat ids (negative); empty = all groups
+rate_limit_per_min = 6                      # per-sender sliding window; 0 disables
+dedup_window_seconds = 300.0                # drop duplicate updates; 0 disables
+```
+
+Export the token, then verify and run — the **same** `doctor` / `start` commands
+drive every channel at once, WeChat and Telegram together:
+
+```bash
+export TELEGRAM_TOKEN_MY_TELEGRAM="123456:ABC-…"
+coding-bridge channels doctor   # getMe confirms the bot token is accepted
+coding-bridge channels start    # long-polls Telegram + serves WeChat, together
+```
+
+Find your own numeric id by messaging [@userinfobot](https://t.me/userinfobot). In
+a group, add the bot and keep a `trigger_prefix` so it only answers on `/ask …`
+(Telegram may also require disabling the bot's privacy mode in BotFather to see
+group messages). Running a self-hosted Bot API server? Set `api_base` on the
+block (defaults to `https://api.telegram.org`).
 
 ### Portal — edit the config in your browser
 
@@ -230,7 +272,7 @@ Bot:  You're on `main` with a clean working tree — nothing staged or modified.
 - **No content in logs.** Only sizes and outcome codes are recorded per turn — the
   message text and the reply body are never written to logs.
 - **Same local trust boundary.** Provider turns run on your machine under your
-  account; the gateway only relays messages.
+  account; the channel (WeChat gateway or Telegram Bot API) only carries messages.
 
 ## Configuration
 

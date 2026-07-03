@@ -8,7 +8,8 @@ Sub-subcommands:
   ``PolicyGate → SessionDispatcher`` per enabled instance, and run the
   adapter loop until Ctrl-C.
 * ``coding-bridge channels doctor`` — validate ``channels.toml``, resolve
-  each token (without ever printing it), and ping each WeChat gateway endpoint.
+  each token (without ever printing it), and ping each channel (WeChat gateway
+  endpoint / Telegram ``getMe``).
 
 The dispatcher-wiring lives ONLY here — the `coding_bridge.channels.*`
 package stays pure library code that can be reused by other CLIs or by tests.
@@ -28,11 +29,12 @@ from typing import TYPE_CHECKING
 import httpx
 
 from .channels import ConfigError, PolicyGate, load_channels_config
+from .channels.telegram import TelegramAdapter, TelegramClient, TelegramError
 from .channels.wechat import WeChatAdapter, WeChatClient
 from .config import Settings
 
 if TYPE_CHECKING:
-    from .channels import ChannelAdapter, WeChatInstanceConfig
+    from .channels import ChannelAdapter, TelegramInstanceConfig, WeChatInstanceConfig
     from .channels.dispatcher import SessionDispatcher
 
 logger = logging.getLogger("coding-bridge.channels.cli")
@@ -64,6 +66,31 @@ _INIT_TEMPLATE = """\
 # rate_limit_per_min = 6
 #
 # # Drop repeat msg_id inside this window (upstream retries). 0 disables.
+# dedup_window_seconds = 300.0
+
+# [[channels.telegram]]
+# instance_id = "my-telegram"
+# # Create a bot with @BotFather, then export the token it hands you:
+# token_env = "TELEGRAM_TOKEN_MY_TELEGRAM"
+# enabled = false
+#
+# # Only respond when a message starts with this prefix. In groups, add the bot
+# # and keep a prefix so it doesn't answer every line. Empty answers everything.
+# trigger_prefix = "/ask "
+#
+# # Only accept messages from these Telegram numeric user IDs (as strings).
+# # Empty list means allow all — safe only for a private bot. Message
+# # @userinfobot to find your own id.
+# allowed_senders = []
+#
+# # Group / supergroup chat IDs (usually negative, as strings) the bot may
+# # answer in. Empty = every group it's added to. Never filters private DMs.
+# allowed_groups = []
+#
+# # At most this many messages per sender per 60 s. 0 disables the limit.
+# rate_limit_per_min = 6
+#
+# # Drop duplicate updates inside this window. 0 disables.
 # dedup_window_seconds = 300.0
 """
 
@@ -102,9 +129,9 @@ def cmd_channels_init(settings: Settings) -> int:
         return 1
     print(f"Wrote {path}")
     print("Next steps:")
-    print("  1. Uncomment the [[channels.wechat]] block and fill in instance_id + base_url.")
+    print("  1. Uncomment a [[channels.wechat]] or [[channels.telegram]] block.")
     print("  2. Export the token env var referenced by `token_env`.")
-    print("  3. Fill `allowed_senders` with your own WeChat wxid.")
+    print("  3. Fill `allowed_senders` with your own sender id(s).")
     print("  4. Flip `enabled = true`.")
     print("  5. Run `coding-bridge channels doctor` to verify.")
     print("  6. Run `coding-bridge channels start`.")
@@ -177,6 +204,34 @@ async def _doctor_one(inst: WeChatInstanceConfig) -> tuple[bool, str]:
         await client.aclose()
 
 
+async def _doctor_one_telegram(inst: TelegramInstanceConfig) -> tuple[bool, str]:
+    """Return (ok, message) for one Telegram instance. Never logs the token.
+
+    Calls ``getMe`` — Telegram's canonical auth probe. 200 → token good (report
+    the bot's ``@username``); 401 → token rejected; anything else → unreachable
+    or transient server error.
+    """
+    try:
+        token = inst.resolve_token()
+    except ConfigError as exc:
+        return False, f"token: {exc}"
+
+    client = TelegramClient(token, api_base=inst.api_base, timeout=8.0)
+    try:
+        me = await client.get_me()
+        username = me.get("username")
+        who = f"@{username}" if username else f"id={me.get('id')}"
+        return True, f"OK (token accepted, bot {who})"
+    except TelegramError as exc:
+        if exc.error_code == 401:
+            return False, "token rejected (401)"
+        return False, f"api error {exc.error_code}"
+    except Exception as exc:  # noqa: BLE001 - diagnostic; class name only
+        return False, f"unreachable: {exc.__class__.__name__}"
+    finally:
+        await client.aclose()
+
+
 def cmd_channels_doctor(settings: Settings) -> int:
     """Load config + check each instance's token + reachability."""
     path = settings.channels_config_path
@@ -186,12 +241,14 @@ def cmd_channels_doctor(settings: Settings) -> int:
         print(f"config error in {path}: {exc}", file=sys.stderr)
         return 2
 
-    if not cfg.wechat:
+    if not cfg.wechat and not cfg.telegram:
         print(f"No channels configured in {path}. Run `channels init` first.")
         return 0
 
+    total = len(cfg.wechat) + len(cfg.telegram)
+    enabled = len(cfg.enabled_wechat) + len(cfg.enabled_telegram)
     print(f"Config file: {path}")
-    print(f"Total instances: {len(cfg.wechat)} (enabled: {len(cfg.enabled_wechat)})")
+    print(f"Total instances: {total} (enabled: {enabled})")
     print()
 
     all_ok = True
@@ -200,11 +257,22 @@ def cmd_channels_doctor(settings: Settings) -> int:
         nonlocal all_ok
         for inst in cfg.wechat:
             state = "ENABLED" if inst.enabled else "disabled"
-            print(f"[{state}] {inst.instance_id}: {inst.base_url}")
+            print(f"[{state}] wechat/{inst.instance_id}: {inst.base_url}")
             if not inst.enabled:
                 print("  → skipped (enabled=false)")
                 continue
             ok, msg = await _doctor_one(inst)
+            marker = "✓" if ok else "✗"
+            print(f"  {marker} {msg}")
+            if not ok:
+                all_ok = False
+        for tg in cfg.telegram:
+            state = "ENABLED" if tg.enabled else "disabled"
+            print(f"[{state}] telegram/{tg.instance_id}: {tg.api_base}")
+            if not tg.enabled:
+                print("  → skipped (enabled=false)")
+                continue
+            ok, msg = await _doctor_one_telegram(tg)
             marker = "✓" if ok else "✗"
             print(f"  {marker} {msg}")
             if not ok:
@@ -232,27 +300,37 @@ def cmd_channels_start(settings: Settings) -> int:
         print(f"config error in {path}: {exc}", file=sys.stderr)
         return 2
 
-    enabled = cfg.enabled_wechat
-    if not enabled:
+    enabled_wechat = cfg.enabled_wechat
+    enabled_telegram = cfg.enabled_telegram
+    if not enabled_wechat and not enabled_telegram:
         print(
             "No enabled channels — set `enabled = true` on at least one "
-            "[[channels.wechat]] block in " + str(path),
+            "[[channels.wechat]] or [[channels.telegram]] block in " + str(path),
             file=sys.stderr,
         )
         return 1
 
     # Resolve tokens up front so a missing env var kills us before any
     # network connection instead of silently.
-    resolved: list[tuple[WeChatInstanceConfig, str]] = []
-    for inst in enabled:
+    wechat_resolved: list[tuple[WeChatInstanceConfig, str]] = []
+    telegram_resolved: list[tuple[TelegramInstanceConfig, str]] = []
+    for inst in enabled_wechat:
         try:
             token = inst.resolve_token()
         except ConfigError as exc:
             print(f"config error: {exc}", file=sys.stderr)
             return 2
-        resolved.append((inst, token))
+        wechat_resolved.append((inst, token))
+    for inst in enabled_telegram:
+        try:
+            token = inst.resolve_token()
+        except ConfigError as exc:
+            print(f"config error: {exc}", file=sys.stderr)
+            return 2
+        telegram_resolved.append((inst, token))
 
     provider_factory = default_provider_factory(settings)
+    total = len(wechat_resolved) + len(telegram_resolved)
 
     async def _go() -> None:
         from .channels.approvals import ApprovalStore
@@ -264,16 +342,19 @@ def cmd_channels_start(settings: Settings) -> int:
         # Shared across instances; only used by instances with require_approval.
         approval_store = ApprovalStore(settings.config_dir / "approvals")
 
-        for inst, token in resolved:
-            dispatcher = SessionDispatcher(
+        def _make_dispatcher(inst: object) -> SessionDispatcher:
+            return SessionDispatcher(
                 settings,
                 provider_factory,
-                default_provider=inst.default_provider or "claude",
+                default_provider=getattr(inst, "default_provider", None) or "claude",
                 approval_store=approval_store,
-                require_approval=inst.require_approval,
+                require_approval=getattr(inst, "require_approval", False),
             )
+
+        for inst, token in wechat_resolved:
+            dispatcher = _make_dispatcher(inst)
             gate = PolicyGate(inst.to_policy(), dispatcher.handle_message)
-            adapter = WeChatAdapter(
+            adapter: ChannelAdapter = WeChatAdapter(
                 instance_id=inst.instance_id,
                 base_url=inst.base_url,
                 token=token,
@@ -283,7 +364,22 @@ def cmd_channels_start(settings: Settings) -> int:
             dispatchers.append(dispatcher)
             adapters.append(adapter)
             runners.append(asyncio.create_task(adapter.run()))
-            print(f"channel started: {inst.instance_id} → {inst.base_url}")
+            print(f"channel started: wechat/{inst.instance_id} → {inst.base_url}")
+
+        for inst, token in telegram_resolved:
+            dispatcher = _make_dispatcher(inst)
+            gate = PolicyGate(inst.to_policy(), dispatcher.handle_message)
+            tg_adapter: ChannelAdapter = TelegramAdapter(
+                instance_id=inst.instance_id,
+                token=token,
+                api_base=inst.api_base,
+                stop_event=stop,
+            )
+            tg_adapter.set_handler(gate.handle)
+            dispatchers.append(dispatcher)
+            adapters.append(tg_adapter)
+            runners.append(asyncio.create_task(tg_adapter.run()))
+            print(f"channel started: telegram/{inst.instance_id} → {inst.api_base}")
 
         try:
             # Wait for any runner to exit (auth failure, etc.) or Ctrl-C.
@@ -307,7 +403,7 @@ def cmd_channels_start(settings: Settings) -> int:
                 with contextlib.suppress(BaseException):
                     await t
 
-    print(f"Starting {len(resolved)} channel(s). Ctrl-C to stop.")
+    print(f"Starting {total} channel(s). Ctrl-C to stop.")
     try:
         asyncio.run(_go())
     except KeyboardInterrupt:

@@ -20,6 +20,7 @@ from .base import (
 from .config import (
     ChannelsConfig,
     ConfigError,
+    TelegramInstanceConfig,
     WeChatInstanceConfig,
     load_channels_config,
     parse_channels_config,
@@ -39,6 +40,7 @@ __all__ = [
     "PolicyGate",
     "SendResult",
     "SessionDispatcher",
+    "TelegramInstanceConfig",
     "TurnEvent",
     "TurnOutcome",
     "WeChatInstanceConfig",

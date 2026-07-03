@@ -22,6 +22,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import time
 import uuid
 from collections.abc import Awaitable, Callable
 from typing import Any
@@ -31,6 +32,7 @@ from ..protocol import Event
 from ..providers.base import ProviderFactory
 from ..session import Session
 from .base import ChannelAdapter, ChannelTarget, IncomingMessage, SendResult
+from .observability import TurnEvent, TurnOutcome, log_turn
 
 logger = logging.getLogger("coding-bridge.channels")
 
@@ -158,6 +160,10 @@ class SessionDispatcher:
             permission_mode="default",
             provider=self._default_provider,
         )
+        started = time.monotonic()
+        outcome: TurnOutcome = "ok"
+        reply = ""
+        sent = False
         try:
             await session.start(msg.text)
             ok = await turn.wait(self._turn_timeout)
@@ -168,28 +174,65 @@ class SessionDispatcher:
             # stale text.
             if turn.error():
                 reply = f"(provider error: {turn.error()})"
+                outcome = "provider_error"
             elif not ok:
+                # Partial text on timeout is kept (better than nothing) but the
+                # turn is still recorded as a timeout for observability.
+                outcome = "timeout"
                 reply = reply or "(provider timed out; no reply)"
             if not reply:
                 reply = "(no reply)"
+                outcome = "empty"
             try:
                 result = await self._reply_sink(adapter, msg.target, reply)
+                sent = True
             except Exception as exc:  # defensive: adapter send should not kill dispatcher
                 logger.exception("channel send failed: %s", exc)
+                outcome = "send_failed"
                 return
             if not result.ok:
+                outcome = "send_failed"
                 logger.warning(
                     "channel send returned failure: adapter=%s instance=%s error=%s",
                     adapter.name,
                     adapter.instance_id,
                     result.error,
                 )
+        except Exception as exc:  # provider/session crash — never kill the task loop
+            outcome = "provider_error"
+            # Log only the exception TYPE, never str(exc)/traceback — an exception
+            # raised out of session.start(msg.text) may echo the user's prompt, which
+            # must not reach the log file / relay forwarder.
+            logger.error(
+                "turn failed: adapter=%s instance=%s error_type=%s",
+                adapter.name,
+                adapter.instance_id,
+                type(exc).__name__,
+            )
+            if not sent:  # avoid a second message if the reply already went out
+                with contextlib.suppress(Exception):
+                    await self._reply_sink(adapter, msg.target, f"(provider error: {exc})")
         finally:
+            # One structured, content-free event per turn (see observability.py).
+            with contextlib.suppress(Exception):
+                log_turn(
+                    TurnEvent(
+                        adapter=adapter.name,
+                        instance_id=adapter.instance_id,
+                        provider=self._default_provider,
+                        outcome=outcome,
+                        latency_ms=int((time.monotonic() - started) * 1000),
+                        prompt_chars=len(msg.text or ""),
+                        reply_chars=len(reply),
+                        session_id=session_id,
+                    )
+                )
             with contextlib.suppress(BaseException):
                 await session.close()
-            async with self._lock:
-                if self._inflight.get(key) is asyncio.current_task():
-                    self._inflight.pop(key, None)
+            with contextlib.suppress(BaseException):
+                async with self._lock:
+                    if self._inflight.get(key) is asyncio.current_task():
+                        self._inflight.pop(key, None)
 
 
 async def _default_reply_sink(

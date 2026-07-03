@@ -413,6 +413,18 @@ def cmd_channels_smoke(
     return 0
 
 
+# ---------- portal ------------------------------------------------------------
+
+
+def cmd_channels_portal(
+    settings: Settings, *, host: str, port: int, open_browser: bool
+) -> int:
+    """Serve the local channels.toml config web UI (loopback only) until Ctrl-C."""
+    from .channels.portal import serve  # local import: pulls httpx + the HTML blob
+
+    return serve(settings, host=host, port=port, open_browser=open_browser)
+
+
 # ---------- argparse wiring ---------------------------------------------------
 
 
@@ -467,6 +479,20 @@ def register_subparsers(
     )
     p_smoke.set_defaults(func=_dispatch_smoke)
 
+    p_portal = sub.add_parser(
+        "portal",
+        help="Open a local web UI to edit channels.toml (pick admins, set trigger mode)",
+        parents=[common],
+    )
+    p_portal.add_argument(
+        "--host", default="127.0.0.1", help="Bind host (loopback only). Default 127.0.0.1."
+    )
+    p_portal.add_argument("--port", type=int, default=8765, help="Bind port. Default 8765.")
+    p_portal.add_argument(
+        "--no-open", action="store_true", help="Do not auto-open the browser."
+    )
+    p_portal.set_defaults(func=_dispatch_portal)
+
 
 def _dispatch_init(args: argparse.Namespace) -> None:
     from .cli import _build_settings  # local import to avoid circular
@@ -499,9 +525,23 @@ def _dispatch_smoke(args: argparse.Namespace) -> None:
     )
 
 
+def _dispatch_portal(args: argparse.Namespace) -> None:
+    from .cli import _build_settings
+
+    raise SystemExit(
+        cmd_channels_portal(
+            _build_settings(args),
+            host=args.host,
+            port=args.port,
+            open_browser=not args.no_open,
+        )
+    )
+
+
 __all__ = [
     "cmd_channels_doctor",
     "cmd_channels_init",
+    "cmd_channels_portal",
     "cmd_channels_smoke",
     "cmd_channels_start",
     "register_subparsers",

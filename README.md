@@ -127,7 +127,7 @@ base_url = "http://127.0.0.1:8000"      # your WeChat gateway
 token_env = "WECHAT_TOKEN_MY_WECHAT"    # env var holding the token (never the token itself)
 enabled = true                          # explicit opt-in
 
-trigger_prefix = "/ask "                # only respond to messages starting with this
+trigger_prefix = "/ask "                # prefix to require; "" = free-form (reply to every message)
 allowed_senders = ["wxid_your_own_id"]  # allowlist; empty = allow all
 rate_limit_per_min = 6                  # per-sender sliding window; 0 disables
 dedup_window_seconds = 300.0            # drop upstream retries; 0 disables
@@ -170,6 +170,7 @@ coding-bridge channels start    # connect and serve until Ctrl-C
 | `doctor` | Validate `channels.toml` and ping every enabled gateway endpoint   |
 | `smoke`  | Run one real provider turn locally to prove your provider works    |
 | `start`  | Connect to each enabled gateway and serve replies until Ctrl-C     |
+| `portal` | Open a local web UI to edit `channels.toml` (pick admins, trigger mode) |
 
 After that one-time setup, day-to-day use is a **single command** —
 `coding-bridge channels start` — and you steer everything from WeChat.
@@ -180,6 +181,28 @@ After that one-time setup, day-to-day use is a **single command** —
 
 To keep `channels start` running across logout/reboot, install it as a service —
 templates in [docs/deploy/](docs/deploy/README.md).
+
+### Portal — edit the config in your browser
+
+Hand-editing `channels.toml` means knowing each admin's raw `wxid`. Instead, run
+the portal:
+
+```bash
+coding-bridge channels portal        # opens http://127.0.0.1:8765/?token=…
+```
+
+It serves a **localhost-only** page (bound to 127.0.0.1, gated by a one-time
+token printed to the console) that talks to your WeChat gateway so you can:
+
+- **pick admins by searching your contacts** (name or id, with avatars) instead
+  of pasting `wxid`s — this fills `allowed_senders`;
+- **toggle Free-form ⇄ Require prefix** (Free-form = `trigger_prefix = ""`, reply
+  to every message; Prefix = only when a message starts with `/ask `);
+- pick the provider, enable/disable the instance, and see the groups the bot is in.
+
+Saving writes `channels.toml` — restart `channels start` to apply. The gateway
+token stays server-side and never reaches the browser. Flags: `--port` (default
+`8765`), `--no-open` (don't launch a browser).
 
 ### Example
 

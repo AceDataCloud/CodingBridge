@@ -94,6 +94,12 @@ select#inst{width:auto;min-width:170px}
 .switch input:checked+.slider{background:var(--accent)}
 .switch input:checked+.slider:before{transform:translateX(18px)}
 .empty{color:var(--muted);font-size:13px;padding:8px 0}
+.appr{display:flex;align-items:flex-start;gap:12px;padding:11px 0;border-top:1px solid var(--border)}
+.appr:first-of-type{border-top:0}
+.appr .pre{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;color:var(--muted);white-space:pre-wrap;word-break:break-all;margin-top:4px;max-height:66px;overflow:auto}
+.appr .btn{padding:7px 14px}
+.btn.approve{background:var(--ok);color:#fff}
+.btn.deny{background:transparent;color:var(--danger);border:1px solid var(--danger)}
 </style>
 </head>
 <body>
@@ -144,18 +150,20 @@ async function api(path,opts={}){
 
 let STATE={instances:[],idx:0,contacts:new Map()};
 let qrPollTimer=null;
+let approvalPollTimer=null;
 function stopQrPoll(){ if(qrPollTimer){ clearInterval(qrPollTimer); qrPollTimer=null; } }
+function stopApprovalPoll(){ if(approvalPollTimer){ clearInterval(approvalPollTimer); approvalPollTimer=null; } }
 
 function current(){return STATE.instances[STATE.idx];}
 
 async function load(){
-  stopQrPoll();
+  stopQrPoll(); stopApprovalPoll();
   const cfg=await api("/api/config"); STATE.instances=cfg.instances; STATE.idx=0;
   $("#cfgpath").textContent=cfg.config_path;
   renderInstSelect();
   if(!STATE.instances.length){ $("#app").innerHTML=""; $("#app").append(noInstances()); $("#bar").style.display="none"; return; }
   $("#bar").style.display="block"; render();
-  loadAccount(); loadGroups(); warmContacts();
+  loadAccount(); loadGroups(); warmContacts(); startApprovalPoll();
 }
 
 function warmContacts(){
@@ -163,6 +171,44 @@ function warmContacts(){
   // Prime the server-side contact cache in the background so the first search
   // is fast instead of blocking ~seconds on a cold 4k-row fetch.
   api("/api/wechat/contacts?instance="+encodeURIComponent(it.instance_id)+"&q=&limit=1").catch(()=>{});
+}
+
+function startApprovalPoll(){
+  stopApprovalPoll();
+  const tick=async ()=>{
+    let d; try{ d=await api("/api/approvals"); }catch(e){ return; }
+    renderApprovals(d.approvals||[]);
+  };
+  tick();
+  approvalPollTimer=setInterval(tick, 2500);
+}
+
+function renderApprovals(list){
+  const box=$("#approvals"); if(!box) return;
+  if(!list.length){ box.innerHTML=""; return; }
+  box.innerHTML="";
+  const card=el("div",{class:"card",style:"border-color:var(--accent)"},
+    el("h2",{},"Tool approvals — "+list.length+" pending"),
+    el("p",{class:"hint"},"The agent wants to run these on your machine. Approve to let it proceed, Deny to block."));
+  list.forEach(a=>{
+    card.append(el("div",{class:"appr"},
+      el("div",{style:"flex:1;min-width:0"},
+        el("div",{class:"nm"}, (a.instance_id?("["+a.instance_id+"] "):"")+(a.tool||"tool")),
+        a.title?el("div",{class:"id"}, a.title):el("span",{}),
+        a.input_preview?el("div",{class:"pre"}, a.input_preview):el("span",{})),
+      el("div",{class:"row",style:"gap:8px;flex:0 0 auto"},
+        el("button",{class:"btn deny",onclick:()=>decide(a.id,"deny")},"Deny"),
+        el("button",{class:"btn approve",onclick:()=>decide(a.id,"allow")},"Approve"))));
+  });
+  box.replaceChildren(card);
+}
+
+async function decide(id, decision){
+  try{
+    await api("/api/approvals",{method:"POST",body:JSON.stringify({id:id,decision:decision})});
+    toast(decision==="allow"?"Approved":"Denied");
+    const d=await api("/api/approvals"); renderApprovals(d.approvals||[]);
+  }catch(e){ toast(e.message,true); }
 }
 
 function noInstances(){
@@ -181,6 +227,7 @@ function renderInstSelect(){
 
 function render(){
   const it=current(); const app=$("#app"); app.innerHTML="";
+  app.append(el("div",{id:"approvals"}));
   app.append(el("div",{id:"onboarding"}));
 
   // account card

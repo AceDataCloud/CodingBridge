@@ -126,6 +126,7 @@ instance_id = "my-wechat"               # unique per instance
 base_url = "http://127.0.0.1:8000"      # your WeChat gateway
 token_env = "WECHAT_TOKEN_MY_WECHAT"    # env var holding the token (never the token itself)
 enabled = true                          # explicit opt-in
+require_approval = false                # true = hold tool use for Approve/Deny in the portal
 
 trigger_prefix = "/ask "                # prefix to require; "" = free-form (reply to every message)
 allowed_senders = ["wxid_your_own_id"]  # allowlist; empty = allow all
@@ -203,6 +204,9 @@ token printed to the console) that talks to your WeChat gateway so you can:
   none checked = every group), choose the provider, and enable/disable the instance.
 - **sign in by QR** — if the account is signed out, the portal shows the gateway's
   login QR and continues automatically once you scan it.
+- **approve tool actions live** — when an instance sets `require_approval = true`,
+  anything the agent wants to run on your machine waits in the portal for your
+  **Approve / Deny** instead of running unattended.
 
 Saving writes `channels.toml` — restart `channels start` to apply. The gateway
 token stays server-side and never reaches the browser. Flags: `--port` (default

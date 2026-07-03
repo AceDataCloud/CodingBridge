@@ -9,6 +9,7 @@ from http.server import ThreadingHTTPServer
 import httpx
 import pytest
 
+from coding_bridge.channels.approvals import ApprovalStore
 from coding_bridge.channels.config import (
     ChannelsConfig,
     WeChatInstanceConfig,
@@ -430,3 +431,76 @@ def test_post_saves(live):
     )
     assert r.status_code == 200
     assert set(r.json()["instances"][0]["allowed_senders"]) == {"CQCcqc", "newguy"}
+
+
+# --------------------------------------------------------------------------- #
+# Tool approvals
+# --------------------------------------------------------------------------- #
+
+
+def test_approvals_list_and_decide(tmp_path, monkeypatch):
+    svc, _ = _service(tmp_path, monkeypatch)
+    ApprovalStore(tmp_path / "approvals").create(
+        "req1", {"tool": "Bash", "input_preview": "ls"}
+    )
+    listed = svc.list_approvals()
+    assert [a["id"] for a in listed] == ["req1"]
+    assert listed[0]["tool"] == "Bash"
+    assert svc.decide_approval("req1", "allow") is True
+    assert svc.list_approvals() == []  # decided → no longer pending
+    assert svc.decide_approval("unknown", "allow") is False
+    svc.close()
+
+
+def test_http_approvals_endpoints(tmp_path, monkeypatch):
+    svc, _ = _service(tmp_path, monkeypatch)
+    ApprovalStore(tmp_path / "approvals").create(
+        "reqA", {"tool": "Bash", "input_preview": "rm -rf /"}
+    )
+    token = "atok"
+    port = _free_port()
+    httpd = ThreadingHTTPServer(("127.0.0.1", port), _make_handler(svc, token, port))
+    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+    thread.start()
+    try:
+        base = f"http://127.0.0.1:{port}"
+        h = {"X-Portal-Token": token}
+        r = httpx.get(base + "/api/approvals", headers=h, timeout=5)
+        assert r.status_code == 200
+        assert [a["id"] for a in r.json()["approvals"]] == ["reqA"]
+        # a bad verdict is rejected
+        assert (
+            httpx.post(
+                base + "/api/approvals",
+                headers=h,
+                json={"id": "reqA", "decision": "maybe"},
+                timeout=5,
+            ).status_code
+            == 400
+        )
+        # a good verdict succeeds
+        r2 = httpx.post(
+            base + "/api/approvals",
+            headers=h,
+            json={"id": "reqA", "decision": "allow"},
+            timeout=5,
+        )
+        assert r2.status_code == 200 and r2.json()["ok"] is True
+        # resolved → no longer pending
+        assert httpx.get(base + "/api/approvals", headers=h, timeout=5).json()["approvals"] == []
+        # unknown id → 404
+        assert (
+            httpx.post(
+                base + "/api/approvals",
+                headers=h,
+                json={"id": "ghost", "decision": "deny"},
+                timeout=5,
+            ).status_code
+            == 404
+        )
+        # the endpoint still requires the portal token
+        assert httpx.get(base + "/api/approvals", timeout=5).status_code == 401
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+        svc.close()

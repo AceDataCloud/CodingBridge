@@ -1,14 +1,16 @@
 """Local web portal for editing ``channels.toml`` — ``coding-bridge channels portal``.
 
-Editing the WeChat channel config by hand is painful: you have to know each
-admin's raw ``wxid`` and each group's ``…@chatroom`` id. This module serves a
-small **localhost-only** web UI that talks to the WeChat gateway on your behalf
-(contacts, groups, the bot account) so you can pick admins/groups from a
-searchable, avatar-annotated list and flip the trigger mode, then writes the
-result back to ``channels.toml``.
+Editing channel config by hand is painful: WeChat wants each admin's raw
+``wxid`` and each group's ``…@chatroom`` id; Telegram wants numeric user/chat
+ids. This module serves a small **localhost-only** web UI that lists every
+configured channel (WeChat + Telegram) and opens a type-appropriate editor —
+for WeChat it talks to the gateway so you can pick admins/groups from a
+searchable, avatar-annotated list; for Telegram it verifies the bot token via
+``getMe`` and takes id allowlists directly — then writes the result back to
+``channels.toml``.
 
-Security model (a config UI that can rewrite local config + reach a gateway
-token must be defensive):
+Security model (a config UI that can rewrite local config + reach channel
+tokens must be defensive):
 
 * **Binds 127.0.0.1 only** — never a public interface. ``serve()`` hard-codes it.
 * **Host-header allowlist** — every request's ``Host`` must be loopback, which
@@ -17,8 +19,8 @@ token must be defensive):
   in the served page; every ``/api`` call must present it. A drive-by page on
   another origin can't read our HTML or our responses (same-origin policy), so
   it can't learn the token and can't drive the API.
-* **The gateway token never reaches the browser** — it's resolved server-side
-  from ``token_env`` / ``token_file`` and only used for outbound gateway calls.
+* **Channel tokens never reach the browser** — they're resolved server-side
+  from ``token_env`` / ``token_file`` and only used for outbound channel calls.
 """
 
 from __future__ import annotations
@@ -43,6 +45,7 @@ from .approvals import ApprovalStore
 from .config import (
     ChannelsConfig,
     ConfigError,
+    TelegramInstanceConfig,
     WeChatInstanceConfig,
     load_channels_config,
     parse_channels_config,
@@ -106,6 +109,8 @@ def _dump_instance(inst: WeChatInstanceConfig) -> str:
     if inst.token_file:
         lines.append(f"token_file = {_toml_str(inst.token_file)}")
     lines.append(f"enabled = {'true' if inst.enabled else 'false'}")
+    if inst.require_approval:
+        lines.append("require_approval = true")
     if inst.default_provider:
         lines.append(f"default_provider = {_toml_str(inst.default_provider)}")
     lines.append(f"trigger_prefix = {_toml_str(inst.trigger_prefix)}")
@@ -119,6 +124,33 @@ def _dump_instance(inst: WeChatInstanceConfig) -> str:
     return "\n".join(lines)
 
 
+def _dump_telegram_instance(inst: TelegramInstanceConfig) -> str:
+    lines = [
+        "[[channels.telegram]]",
+        f"instance_id = {_toml_str(inst.instance_id)}",
+    ]
+    if inst.token_env:
+        lines.append(f"token_env = {_toml_str(inst.token_env)}")
+    if inst.token_file:
+        lines.append(f"token_file = {_toml_str(inst.token_file)}")
+    # Only write api_base when it deviates from the default, to keep files clean.
+    if inst.api_base and inst.api_base != "https://api.telegram.org":
+        lines.append(f"api_base = {_toml_str(inst.api_base)}")
+    lines.append(f"enabled = {'true' if inst.enabled else 'false'}")
+    if inst.require_approval:
+        lines.append("require_approval = true")
+    if inst.default_provider:
+        lines.append(f"default_provider = {_toml_str(inst.default_provider)}")
+    lines.append(f"trigger_prefix = {_toml_str(inst.trigger_prefix)}")
+    senders = ", ".join(_toml_str(s) for s in inst.allowed_senders)
+    lines.append(f"allowed_senders = [{senders}]")
+    groups = ", ".join(_toml_str(s) for s in inst.allowed_groups)
+    lines.append(f"allowed_groups = [{groups}]")
+    lines.append(f"rate_limit_per_min = {inst.rate_limit_per_min}")
+    lines.append(f"dedup_window_seconds = {inst.dedup_window_seconds!r}")
+    return "\n".join(lines)
+
+
 def dump_channels_toml(config: ChannelsConfig) -> str:
     """Render a :class:`ChannelsConfig` back to ``channels.toml`` text."""
     header = (
@@ -126,9 +158,11 @@ def dump_channels_toml(config: ChannelsConfig) -> str:
         "# Managed by `coding-bridge channels portal` — hand edits are preserved\n"
         "# in spirit but reformatted on the next portal save.\n"
     )
-    if not config.wechat:
+    if not config.wechat and not config.telegram:
         return header
-    body = "\n\n".join(_dump_instance(inst) for inst in config.wechat)
+    blocks = [_dump_instance(inst) for inst in config.wechat]
+    blocks += [_dump_telegram_instance(inst) for inst in config.telegram]
+    body = "\n\n".join(blocks)
     return f"{header}\n{body}\n"
 
 
@@ -163,11 +197,41 @@ def _instance_public(inst: WeChatInstanceConfig, *, resolvable: bool) -> dict[st
     else:
         token_source = {"kind": "none", "ref": None}
     return {
+        "type": "wechat",
         "instance_id": inst.instance_id,
         "base_url": inst.base_url,
         "token_source": token_source,
         "token_resolvable": resolvable,
         "enabled": inst.enabled,
+        "require_approval": inst.require_approval,
+        "default_provider": inst.default_provider or "claude",
+        "trigger_prefix": inst.trigger_prefix,
+        "free_form": inst.trigger_prefix == "",
+        "allowed_senders": list(inst.allowed_senders),
+        "allowed_groups": list(inst.allowed_groups),
+        "rate_limit_per_min": inst.rate_limit_per_min,
+        "dedup_window_seconds": inst.dedup_window_seconds,
+    }
+
+
+def _telegram_instance_public(
+    inst: TelegramInstanceConfig, *, resolvable: bool
+) -> dict[str, Any]:
+    """JSON view of one Telegram instance — never includes the token value."""
+    if inst.token_env:
+        token_source = {"kind": "env", "ref": inst.token_env}
+    elif inst.token_file:
+        token_source = {"kind": "file", "ref": inst.token_file}
+    else:
+        token_source = {"kind": "none", "ref": None}
+    return {
+        "type": "telegram",
+        "instance_id": inst.instance_id,
+        "api_base": inst.api_base,
+        "token_source": token_source,
+        "token_resolvable": resolvable,
+        "enabled": inst.enabled,
+        "require_approval": inst.require_approval,
         "default_provider": inst.default_provider or "claude",
         "trigger_prefix": inst.trigger_prefix,
         "free_form": inst.trigger_prefix == "",
@@ -221,9 +285,15 @@ class PortalService:
             _instance_public(inst, resolvable=self._token_resolvable(inst))
             for inst in cfg.wechat
         ]
+        instances += [
+            _telegram_instance_public(inst, resolvable=self._token_resolvable(inst))
+            for inst in cfg.telegram
+        ]
         return {"config_path": str(self._path), "instances": instances}
 
-    def _token_resolvable(self, inst: WeChatInstanceConfig) -> bool:
+    def _token_resolvable(
+        self, inst: WeChatInstanceConfig | TelegramInstanceConfig
+    ) -> bool:
         try:
             inst.resolve_token()
             return True
@@ -236,13 +306,22 @@ class PortalService:
             raise PortalError(400, "instances must be a list")
         # Round-trip through the real loader so the portal can never write a
         # config the daemon would then refuse to start with.
-        blocks: list[dict[str, Any]] = []
+        wechat_blocks: list[dict[str, Any]] = []
+        telegram_blocks: list[dict[str, Any]] = []
         for item in instances:
             if not isinstance(item, dict):
                 raise PortalError(400, "each instance must be an object")
-            blocks.append(_instance_from_payload(item))
+            kind = item.get("type", "wechat")
+            if kind == "telegram":
+                telegram_blocks.append(_telegram_instance_from_payload(item))
+            elif kind == "wechat":
+                wechat_blocks.append(_instance_from_payload(item))
+            else:
+                raise PortalError(400, f"unknown instance type {kind!r}")
         try:
-            cfg = parse_channels_config({"channels": {"wechat": blocks}})
+            cfg = parse_channels_config(
+                {"channels": {"wechat": wechat_blocks, "telegram": telegram_blocks}}
+            )
         except ConfigError as exc:
             raise PortalError(400, str(exc)) from None
         try:
@@ -259,6 +338,12 @@ class PortalService:
             if inst.instance_id == instance_id:
                 return inst
         raise PortalError(404, f"no such instance {instance_id!r}")
+
+    def _telegram_instance(self, instance_id: str) -> TelegramInstanceConfig:
+        for inst in self._load().telegram:
+            if inst.instance_id == instance_id:
+                return inst
+        raise PortalError(404, f"no such telegram instance {instance_id!r}")
 
     # ---- tool approvals ------------------------------------------------- #
 
@@ -368,6 +453,37 @@ class PortalService:
                 )
         return out
 
+    # ---- Telegram Bot API probe ----------------------------------------- #
+
+    def telegram_status(self, instance_id: str) -> dict[str, Any]:
+        """Confirm a Telegram bot token via ``getMe``. Never logs the token.
+
+        The token lives only in the request URL path; on any transport error we
+        surface the exception *class name* only — never ``str(exc)`` (which could
+        echo the URL) — mirroring the async client's redaction contract.
+        """
+        inst = self._telegram_instance(instance_id)
+        try:
+            token = inst.resolve_token()
+        except ConfigError as exc:
+            raise PortalError(400, str(exc)) from None
+        url = f"{inst.api_base}/bot{token}/getMe"
+        try:
+            resp = self._client.request("POST", url, json={})
+        except httpx.HTTPError as exc:
+            raise PortalError(502, f"telegram unreachable: {exc.__class__.__name__}") from None
+        try:
+            body = resp.json()
+        except ValueError:
+            raise PortalError(502, "telegram returned non-JSON") from None
+        if isinstance(body, dict) and body.get("ok"):
+            result = body.get("result") if isinstance(body.get("result"), dict) else {}
+            return {"ok": True, "username": result.get("username"), "id": result.get("id")}
+        code = body.get("error_code") if isinstance(body, dict) else resp.status_code
+        if code == 401:
+            raise PortalError(502, "telegram rejected the bot token (check token_env/token_file)")
+        raise PortalError(502, f"telegram getMe failed (code {code})")
+
     def search_contacts(self, instance_id: str, query: str, limit: int) -> list[dict[str, Any]]:
         inst = self._instance(instance_id)
         contacts = self._contacts(inst)
@@ -475,7 +591,44 @@ def _instance_from_payload(item: dict[str, Any]) -> dict[str, Any]:
             block[key] = val
     if "enabled" in item:
         block["enabled"] = bool(item["enabled"])
+    if "require_approval" in item:
+        block["require_approval"] = bool(item["require_approval"])
     # ``free_form`` is the UI-friendly form of ``trigger_prefix == ""``.
+    if item.get("free_form") is True:
+        block["trigger_prefix"] = ""
+    elif isinstance(item.get("trigger_prefix"), str):
+        block["trigger_prefix"] = item["trigger_prefix"]
+    senders = item.get("allowed_senders")
+    if isinstance(senders, list):
+        block["allowed_senders"] = [s for s in senders if isinstance(s, str) and s]
+    groups = item.get("allowed_groups")
+    if isinstance(groups, list):
+        block["allowed_groups"] = [s for s in groups if isinstance(s, str) and s]
+    if isinstance(item.get("rate_limit_per_min"), int) and not isinstance(
+        item.get("rate_limit_per_min"), bool
+    ):
+        block["rate_limit_per_min"] = item["rate_limit_per_min"]
+    dedup = item.get("dedup_window_seconds")
+    if isinstance(dedup, (int, float)) and not isinstance(dedup, bool):
+        block["dedup_window_seconds"] = dedup
+    return block
+
+
+def _telegram_instance_from_payload(item: dict[str, Any]) -> dict[str, Any]:
+    """Map a browser payload to a raw ``[[channels.telegram]]`` dict.
+
+    Allow-listed like the WeChat mapper: only known keys pass through, and
+    ``parse_channels_config`` then enforces every type/constraint.
+    """
+    block: dict[str, Any] = {}
+    for key in ("instance_id", "api_base", "token_env", "token_file", "default_provider"):
+        val = item.get(key)
+        if isinstance(val, str) and val:
+            block[key] = val
+    if "enabled" in item:
+        block["enabled"] = bool(item["enabled"])
+    if "require_approval" in item:
+        block["require_approval"] = bool(item["require_approval"])
     if item.get("free_form") is True:
         block["trigger_prefix"] = ""
     elif isinstance(item.get("trigger_prefix"), str):
@@ -624,6 +777,8 @@ def _make_handler(service: PortalService, token: str, port: int) -> type[BaseHTT
                     self._send_json(200, service.qr(instance))
                 elif path == "/api/wechat/groups":
                     self._send_json(200, {"groups": service.groups(instance)})
+                elif path == "/api/telegram/status":
+                    self._send_json(200, service.telegram_status(instance))
                 elif path == "/api/wechat/contacts":
                     q = query.get("q", [""])[0]
                     try:

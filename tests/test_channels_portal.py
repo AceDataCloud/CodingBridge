@@ -12,6 +12,7 @@ import pytest
 from coding_bridge.channels.approvals import ApprovalStore
 from coding_bridge.channels.config import (
     ChannelsConfig,
+    TelegramInstanceConfig,
     WeChatInstanceConfig,
     load_channels_config,
 )
@@ -504,3 +505,235 @@ def test_http_approvals_endpoints(tmp_path, monkeypatch):
         httpd.shutdown()
         httpd.server_close()
         svc.close()
+
+
+# --------------------------------------------------------------------------- #
+# Channel-agnostic portal — Telegram as a WeChat peer
+# --------------------------------------------------------------------------- #
+
+
+def _tg_inst(**over):
+    base = {
+        "instance_id": "tg1",
+        "token_env": "TT",
+        "enabled": True,
+        "default_provider": "claude",
+        "trigger_prefix": "/ask ",
+        "allowed_senders": ("123",),
+        "rate_limit_per_min": 6,
+        "dedup_window_seconds": 300.0,
+    }
+    base.update(over)
+    return TelegramInstanceConfig(**base)
+
+
+def _tg_getme_transport(*, ok=True, username="mybot", error_code=401):
+    """MockTransport answering Telegram ``getMe`` (token is only in the URL path)."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/getMe"):
+            if ok:
+                return httpx.Response(
+                    200, json={"ok": True, "result": {"id": 42, "username": username}}
+                )
+            return httpx.Response(
+                200, json={"ok": False, "error_code": error_code, "description": "Unauthorized"}
+            )
+        return httpx.Response(404, json={})
+
+    return httpx.MockTransport(handler)
+
+
+def test_toml_roundtrip_telegram(tmp_path):
+    cfg = ChannelsConfig(
+        wechat=(_inst(instance_id="wx"),),
+        telegram=(
+            _tg_inst(
+                instance_id="tg",
+                api_base="https://tg.example.com",
+                require_approval=True,
+                allowed_groups=("-100",),
+            ),
+        ),
+    )
+    path = tmp_path / "channels.toml"
+    path.write_text(dump_channels_toml(cfg), encoding="utf-8")
+    back = load_channels_config(path)
+    assert [i.instance_id for i in back.wechat] == ["wx"]
+    tg = back.telegram[0]
+    assert tg.instance_id == "tg"
+    assert tg.api_base == "https://tg.example.com"
+    assert tg.require_approval is True
+    assert tg.allowed_groups == ("-100",)
+
+
+def test_public_config_includes_type_and_telegram(tmp_path, monkeypatch):
+    monkeypatch.setenv("WT", "gw-secret")
+    monkeypatch.setenv("TT", "tg-secret")
+    s = _settings(tmp_path)
+    (tmp_path / "channels.toml").write_text(
+        dump_channels_toml(ChannelsConfig(wechat=(_inst(),), telegram=(_tg_inst(),))),
+        encoding="utf-8",
+    )
+    svc = PortalService(s, client=httpx.Client(transport=_tg_getme_transport()))
+    pub = svc.public_config()
+    types = {i["instance_id"]: i["type"] for i in pub["instances"]}
+    assert types == {"beijing": "wechat", "tg1": "telegram"}
+    tg = next(i for i in pub["instances"] if i["type"] == "telegram")
+    assert tg["api_base"] == "https://api.telegram.org"
+    assert tg["token_resolvable"] is True
+    # neither secret ever appears in the payload
+    assert "tg-secret" not in str(pub) and "gw-secret" not in str(pub)
+    svc.close()
+
+
+def test_save_roundtrips_wechat_and_telegram(tmp_path, monkeypatch):
+    monkeypatch.setenv("WT", "gw-secret")
+    monkeypatch.setenv("TT", "tg-secret")
+    s = _settings(tmp_path)
+    svc = PortalService(s, client=httpx.Client(transport=_tg_getme_transport()))
+    result = svc.save(
+        [
+            {
+                "type": "wechat",
+                "instance_id": "wx",
+                "base_url": "http://gw",
+                "token_env": "WT",
+                "enabled": True,
+                "allowed_groups": ["g@chatroom"],
+            },
+            {
+                "type": "telegram",
+                "instance_id": "tg",
+                "token_env": "TT",
+                "enabled": True,
+                "free_form": False,
+                "trigger_prefix": "/ask ",
+                "allowed_senders": ["123", ""],  # empty dropped
+                "allowed_groups": ["-100"],
+                "rate_limit_per_min": 4,
+                "dedup_window_seconds": 120,
+            },
+        ]
+    )
+    kinds = {i["instance_id"]: i["type"] for i in result["instances"]}
+    assert kinds == {"wx": "wechat", "tg": "telegram"}
+    reloaded = load_channels_config(tmp_path / "channels.toml")
+    assert reloaded.wechat[0].allowed_groups == ("g@chatroom",)
+    tg = reloaded.telegram[0]
+    assert tg.allowed_senders == ("123",) and tg.allowed_groups == ("-100",)
+    assert tg.rate_limit_per_min == 4 and tg.dedup_window_seconds == 120.0
+    svc.close()
+
+
+def test_save_preserves_require_approval_both_types(tmp_path, monkeypatch):
+    monkeypatch.setenv("WT", "gw-secret")
+    monkeypatch.setenv("TT", "tg-secret")
+    s = _settings(tmp_path)
+    svc = PortalService(s, client=httpx.Client(transport=_tg_getme_transport()))
+    result = svc.save(
+        [
+            {
+                "type": "wechat",
+                "instance_id": "wx",
+                "base_url": "http://gw",
+                "token_env": "WT",
+                "require_approval": True,
+            },
+            {
+                "type": "telegram",
+                "instance_id": "tg",
+                "token_env": "TT",
+                "require_approval": True,
+            },
+        ]
+    )
+    for inst in result["instances"]:
+        assert inst["require_approval"] is True
+    reloaded = load_channels_config(tmp_path / "channels.toml")
+    assert reloaded.wechat[0].require_approval is True
+    assert reloaded.telegram[0].require_approval is True
+    svc.close()
+
+
+def test_save_unknown_type_rejected(tmp_path, monkeypatch):
+    s = _settings(tmp_path)
+    svc = PortalService(s, client=httpx.Client(transport=_tg_getme_transport()))
+    with pytest.raises(PortalError) as ei:
+        svc.save([{"type": "discord", "instance_id": "x"}])
+    assert ei.value.status == 400
+    svc.close()
+
+
+def test_telegram_status_ok(tmp_path, monkeypatch):
+    monkeypatch.setenv("TT", "tg-secret")
+    s = _settings(tmp_path)
+    (tmp_path / "channels.toml").write_text(
+        dump_channels_toml(ChannelsConfig(telegram=(_tg_inst(),))), encoding="utf-8"
+    )
+    svc = PortalService(s, client=httpx.Client(transport=_tg_getme_transport(username="acebot")))
+    st = svc.telegram_status("tg1")
+    assert st["ok"] is True and st["username"] == "acebot"
+    svc.close()
+
+
+def test_telegram_status_401_no_token_leak(tmp_path, monkeypatch):
+    monkeypatch.setenv("TT", "supersecrettoken")
+    s = _settings(tmp_path)
+    (tmp_path / "channels.toml").write_text(
+        dump_channels_toml(ChannelsConfig(telegram=(_tg_inst(),))), encoding="utf-8"
+    )
+    svc = PortalService(
+        s, client=httpx.Client(transport=_tg_getme_transport(ok=False, error_code=401))
+    )
+    with pytest.raises(PortalError) as ei:
+        svc.telegram_status("tg1")
+    assert ei.value.status == 502
+    assert "supersecrettoken" not in ei.value.message
+    svc.close()
+
+
+def test_telegram_status_unknown_instance_404(tmp_path, monkeypatch):
+    s = _settings(tmp_path)
+    svc = PortalService(s, client=httpx.Client(transport=_tg_getme_transport()))
+    with pytest.raises(PortalError) as ei:
+        svc.telegram_status("ghost")
+    assert ei.value.status == 404
+    svc.close()
+
+
+def test_http_telegram_status_route(tmp_path, monkeypatch):
+    monkeypatch.setenv("TT", "tg-secret")
+    s = _settings(tmp_path)
+    (tmp_path / "channels.toml").write_text(
+        dump_channels_toml(ChannelsConfig(telegram=(_tg_inst(),))), encoding="utf-8"
+    )
+    svc = PortalService(s, client=httpx.Client(transport=_tg_getme_transport(username="acebot")))
+    token = "tgtok"
+    port = _free_port()
+    httpd = ThreadingHTTPServer(("127.0.0.1", port), _make_handler(svc, token, port))
+    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+    thread.start()
+    try:
+        base = f"http://127.0.0.1:{port}"
+        r = httpx.get(
+            base + "/api/telegram/status?instance=tg1",
+            headers={"X-Portal-Token": token},
+            timeout=5,
+        )
+        assert r.status_code == 200 and r.json()["username"] == "acebot"
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+        svc.close()
+
+
+def test_index_save_payload_carries_type_and_channel_fields():
+    """Regression guard: the client save() must send ``type`` (+ ``api_base`` and
+    ``require_approval``) so a Telegram instance can never be mis-serialized as a
+    WeChat block (which drops it / errors on the missing base_url)."""
+    from coding_bridge.channels.portal_html import INDEX_HTML
+
+    assert "type: it.type" in INDEX_HTML
+    assert "o.api_base=it.api_base" in INDEX_HTML
+    assert "require_approval: it.require_approval" in INDEX_HTML

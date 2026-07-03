@@ -143,16 +143,26 @@ async function api(path,opts={}){
 }
 
 let STATE={instances:[],idx:0,contacts:new Map()};
+let qrPollTimer=null;
+function stopQrPoll(){ if(qrPollTimer){ clearInterval(qrPollTimer); qrPollTimer=null; } }
 
 function current(){return STATE.instances[STATE.idx];}
 
 async function load(){
+  stopQrPoll();
   const cfg=await api("/api/config"); STATE.instances=cfg.instances; STATE.idx=0;
   $("#cfgpath").textContent=cfg.config_path;
   renderInstSelect();
   if(!STATE.instances.length){ $("#app").innerHTML=""; $("#app").append(noInstances()); $("#bar").style.display="none"; return; }
   $("#bar").style.display="block"; render();
-  loadAccount(); loadGroups();
+  loadAccount(); loadGroups(); warmContacts();
+}
+
+function warmContacts(){
+  const it=current(); if(!it||!it.token_resolvable) return;
+  // Prime the server-side contact cache in the background so the first search
+  // is fast instead of blocking ~seconds on a cold 4k-row fetch.
+  api("/api/wechat/contacts?instance="+encodeURIComponent(it.instance_id)+"&q=&limit=1").catch(()=>{});
 }
 
 function noInstances(){
@@ -164,13 +174,14 @@ function noInstances(){
 function renderInstSelect(){
   const w=$("#instwrap"); w.innerHTML="";
   if(STATE.instances.length<=1) return;
-  const sel=el("select",{id:"inst",onchange:e=>{STATE.idx=+e.target.value;render();loadAccount();loadGroups();}});
+  const sel=el("select",{id:"inst",onchange:e=>{stopQrPoll();STATE.idx=+e.target.value;render();loadAccount();loadGroups();warmContacts();}});
   STATE.instances.forEach((it,i)=>sel.append(el("option",{value:i},it.instance_id)));
   w.append(sel);
 }
 
 function render(){
   const it=current(); const app=$("#app"); app.innerHTML="";
+  app.append(el("div",{id:"onboarding"}));
 
   // account card
   const acct=el("div",{class:"card"},
@@ -254,7 +265,8 @@ function renderChips(){
 
 async function doSearch(q){
   const it=current(); const box=$("#results");
-  if(!it.token_resolvable){ box.innerHTML=""; box.append(el("div",{class:"opt muted"},"token not set — cannot load contacts")); box.classList.add("show"); return; }
+  if(!it.token_resolvable){ box.replaceChildren(el("div",{class:"opt muted"},"token not set — cannot load contacts")); box.classList.add("show"); return; }
+  box.replaceChildren(el("div",{class:"opt muted"},"searching…")); box.classList.add("show");
   try{
     const d=await api("/api/wechat/contacts?instance="+encodeURIComponent(it.instance_id)+"&q="+encodeURIComponent(q)+"&limit=25");
     box.innerHTML="";
@@ -277,14 +289,50 @@ function addSender(c){
 }
 
 async function loadAccount(){
-  const it=current(); if(!it||!it.token_resolvable) return;
+  const it=current(); const onb=$("#onboarding"); if(!it) return;
+  if(!it.token_resolvable){ if(onb) onb.innerHTML=""; return; }
+  let st=null;
+  try{ st=await api("/api/wechat/status?instance="+encodeURIComponent(it.instance_id)); }
+  catch(e){ if(onb) onb.innerHTML=""; return; }
+  if(st && st.logged_in===false){ renderOnboarding(it, st); return; }
+  stopQrPoll(); if(onb) onb.innerHTML="";
   try{
     const a=await api("/api/wechat/account?instance="+encodeURIComponent(it.instance_id));
-    const line=$("#acctline"); const acct=$("#acct");
+    const acct=$("#acct");
     if(acct){ acct.replaceChildren(avatar(a.avatar_url,a.nickname||it.instance_id),
       el("div",{}, el("div",{style:"font-weight:650"}, a.nickname||a.wechat_id||it.instance_id),
         el("div",{class:"pill"}, el("span",{class:"dot"+((a.status==="online")?"":" off")}), (a.wechat_id||"")+" · "+it.base_url))); }
   }catch(e){ /* leave the fallback header */ }
+}
+
+function renderOnboarding(it, st){
+  const onb=$("#onboarding"); if(!onb) return;
+  onb.innerHTML="";
+  onb.append(el("div",{class:"card",style:"text-align:center"},
+    el("h2",{style:"text-align:left"},"Connect WeChat"),
+    el("p",{class:"hint",style:"text-align:left"},"This account is signed out"+((st&&st.page)?(" ("+st.page+")"):"")+". Scan the QR below with the WeChat app to sign in."),
+    el("div",{id:"qrbox",style:"margin:10px auto"}, el("div",{class:"empty"},"loading QR…")),
+    el("button",{class:"btn ghost",onclick:()=>loadQR(it)},"Refresh QR")));
+  loadQR(it);
+  stopQrPoll();
+  qrPollTimer=setInterval(async ()=>{
+    try{ const s=await api("/api/wechat/status?instance="+encodeURIComponent(it.instance_id));
+      if(s && s.logged_in){ stopQrPoll(); toast("WeChat connected"); load(); } }catch(e){}
+  }, 3000);
+}
+
+async function loadQR(it){
+  const box=$("#qrbox"); if(!box) return;
+  box.replaceChildren(el("div",{class:"empty"},"loading QR…"));
+  try{
+    const d=await api("/api/wechat/qr?instance="+encodeURIComponent(it.instance_id));
+    box.replaceChildren(el("img",{src:"data:image/png;base64,"+d.base64,alt:"WeChat login QR",
+      style:"width:220px;height:220px;border-radius:12px;border:1px solid var(--border)"}));
+  }catch(e){
+    const msg=String(e.message||"");
+    if(msg.indexOf("already logged in")>=0){ stopQrPoll(); load(); return; }
+    box.replaceChildren(el("div",{class:"empty"},"QR error: "+msg));
+  }
 }
 
 async function loadGroups(){

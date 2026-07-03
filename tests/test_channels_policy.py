@@ -471,3 +471,85 @@ class TestRateLimitMapBounded:
         await gate.handle(_msg("/ask a", sender_id="C", upstream_id="4"), _StubAdapter())
         # A survived, B was evicted, C is new
         assert set(gate._windows.keys()) == {"A", "C"}
+
+
+# ---------- group allowlist ---------------------------------------------------
+
+
+def _group_msg(
+    text: str,
+    *,
+    group_id: str = "team@chatroom",
+    sender_id: str = "wxid_alice",
+    upstream_id: str | None = "g1",
+) -> IncomingMessage:
+    return IncomingMessage(
+        sender_id=sender_id,
+        sender_name="Alice",
+        target=ChannelTarget(conversation_id=group_id, conversation_type="group"),
+        text=text,
+        msg_type="text",
+        direction="inbound",
+        upstream_id=upstream_id,
+    )
+
+
+class TestGroupAllowlist:
+    @pytest.mark.asyncio
+    async def test_empty_allowed_groups_allows_any_group(self) -> None:
+        recorder = _Recorder()
+        gate = PolicyGate(ChannelPolicy(allowed_groups=()), recorder.make_handler())
+        await gate.handle(_group_msg("/ask x", group_id="any@chatroom"), _StubAdapter())
+        assert len(recorder.calls) == 1
+
+    @pytest.mark.asyncio
+    async def test_group_in_allowlist_forwards(self) -> None:
+        recorder = _Recorder()
+        gate = PolicyGate(
+            ChannelPolicy(allowed_groups=("team@chatroom",)), recorder.make_handler()
+        )
+        await gate.handle(_group_msg("/ask x", group_id="team@chatroom"), _StubAdapter())
+        assert len(recorder.calls) == 1
+
+    @pytest.mark.asyncio
+    async def test_group_not_in_allowlist_dropped(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        recorder = _Recorder()
+        gate = PolicyGate(
+            ChannelPolicy(allowed_groups=("team@chatroom",)), recorder.make_handler()
+        )
+        with caplog.at_level(logging.INFO, logger="coding-bridge.channels"):
+            await gate.handle(
+                _group_msg("/ask x", group_id="customers@chatroom"), _StubAdapter()
+            )
+        assert recorder.calls == []
+        assert any("reason=group_not_allowed" in r.getMessage() for r in caplog.records)
+
+    @pytest.mark.asyncio
+    async def test_private_dm_unaffected_by_allowed_groups(self) -> None:
+        # A 1:1 DM (conversation_type defaults to "private") must pass even when
+        # allowed_groups is set — group rules never filter DMs.
+        recorder = _Recorder()
+        gate = PolicyGate(
+            ChannelPolicy(allowed_groups=("team@chatroom",)), recorder.make_handler()
+        )
+        await gate.handle(_msg("/ask x", conversation_id="wxid_alice"), _StubAdapter())
+        assert len(recorder.calls) == 1
+
+    @pytest.mark.asyncio
+    async def test_disallowed_group_dropped_even_for_allowed_sender(self) -> None:
+        # Sender is allowlisted, but the group isn't → still dropped.
+        recorder = _Recorder()
+        gate = PolicyGate(
+            ChannelPolicy(
+                allowed_groups=("team@chatroom",),
+                allowed_senders=("wxid_alice",),
+            ),
+            recorder.make_handler(),
+        )
+        await gate.handle(
+            _group_msg("/ask x", group_id="other@chatroom", sender_id="wxid_alice"),
+            _StubAdapter(),
+        )
+        assert recorder.calls == []

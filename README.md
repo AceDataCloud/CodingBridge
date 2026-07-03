@@ -129,6 +129,7 @@ enabled = true                          # explicit opt-in
 
 trigger_prefix = "/ask "                # prefix to require; "" = free-form (reply to every message)
 allowed_senders = ["wxid_your_own_id"]  # allowlist; empty = allow all
+allowed_groups = []                     # groups the bot may answer in; empty = all groups
 rate_limit_per_min = 6                  # per-sender sliding window; 0 disables
 dedup_window_seconds = 300.0            # drop upstream retries; 0 disables
 ```
@@ -198,7 +199,8 @@ token printed to the console) that talks to your WeChat gateway so you can:
   of pasting `wxid`s — this fills `allowed_senders`;
 - **toggle Free-form ⇄ Require prefix** (Free-form = `trigger_prefix = ""`, reply
   to every message; Prefix = only when a message starts with `/ask `);
-- pick the provider, enable/disable the instance, and see the groups the bot is in.
+- **pick which groups the bot may answer in** (checkboxes → `allowed_groups`;
+  none checked = every group), choose the provider, and enable/disable the instance.
 
 Saving writes `channels.toml` — restart `channels start` to apply. The gateway
 token stays server-side and never reaches the browser. Flags: `--port` (default

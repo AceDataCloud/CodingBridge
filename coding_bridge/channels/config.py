@@ -62,6 +62,7 @@ _WECHAT_KEYS = frozenset(
         "default_provider",
         "trigger_prefix",
         "allowed_senders",
+        "allowed_groups",
         "rate_limit_per_min",
         "dedup_window_seconds",
     }
@@ -97,6 +98,9 @@ class WeChatInstanceConfig:
     #: Sender allowlist. Empty tuple = allow all (still gated by the WeChat
     #: gateway token). Stored as tuple because ``WeChatInstanceConfig`` is frozen.
     allowed_senders: tuple[str, ...] = ()
+    #: Group conversation IDs the bot may answer in. Empty tuple = every group
+    #: allowed. Only restricts group chats; private DMs are never filtered.
+    allowed_groups: tuple[str, ...] = ()
     #: Sliding-window rate limit per sender_id over the last 60 s.
     rate_limit_per_min: int = 6
     #: Dedup window for repeat upstream ``msg_id`` (upstream retries). ``0``
@@ -115,6 +119,7 @@ class WeChatInstanceConfig:
         return ChannelPolicy(
             trigger_prefix=self.trigger_prefix,
             allowed_senders=self.allowed_senders,
+            allowed_groups=self.allowed_groups,
             rate_limit_per_min=self.rate_limit_per_min,
             dedup_window_seconds=self.dedup_window_seconds,
         )
@@ -270,6 +275,15 @@ def _parse_wechat(block: dict[str, Any], index: int) -> WeChatInstanceConfig:
             "list of non-empty strings"
         )
 
+    allowed_groups_raw = block.get("allowed_groups", [])
+    if not isinstance(allowed_groups_raw, list) or not all(
+        isinstance(x, str) and x for x in allowed_groups_raw
+    ):
+        raise ConfigError(
+            f"[[channels.wechat]] {instance_id!r}: allowed_groups must be a "
+            "list of non-empty strings"
+        )
+
     rate_limit = block.get("rate_limit_per_min", 6)
     # Bool is a subclass of int in Python — reject explicit bools to catch
     # `rate_limit_per_min = true` typos.
@@ -307,6 +321,7 @@ def _parse_wechat(block: dict[str, Any], index: int) -> WeChatInstanceConfig:
         default_provider=default_provider,
         trigger_prefix=trigger_prefix,
         allowed_senders=tuple(allowed_senders_raw),
+        allowed_groups=tuple(allowed_groups_raw),
         rate_limit_per_min=rate_limit,
         dedup_window_seconds=float(dedup_window),
     )

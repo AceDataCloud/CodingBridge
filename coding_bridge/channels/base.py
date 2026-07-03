@@ -1,7 +1,7 @@
 """Channel-adapter Protocol and value objects shared by every messenger.
 
-An adapter is the thin glue between one external messaging system (WeChat via
-Wisdom, later Telegram / Discord …) and the dispatcher. It never spawns provider
+An adapter is the thin glue between one external messaging system (WeChat,
+later Telegram / Discord …) and the dispatcher. It never spawns provider
 processes, tracks sessions, or evaluates prompts — those live in
 ``SessionDispatcher`` and reuse the existing ``Session`` / ``Provider`` machinery
 so the browser and WeChat paths share one coding-agent implementation.
@@ -9,7 +9,7 @@ so the browser and WeChat paths share one coding-agent implementation.
 Design invariants:
 
 * ``instance_id`` is opaque to the dispatcher but MUST be stable per adapter
-  instance (per configured Wisdom endpoint, per Bot token, …) so multi-instance
+  instance (per configured WeChat gateway endpoint, per Bot token, …) so multi-instance
   deployments can namespace dedup keys, log fields, and outbox rows.
 * ``send()`` is expected to return a ``SendResult`` — never raise on a delivery
   failure — because delivery is best-effort and the dispatcher records the
@@ -29,8 +29,8 @@ class ChannelTarget:
 
     ``conversation_id`` is the ID of the "room" — a WeChat private chat wxid, a
     group room id, a Telegram chat_id, etc. ``reply_to_id`` is set only when the
-    external protocol supports a reply-to primitive worth carrying (WeChat
-    Wisdom's ``msg_id``, Telegram's ``reply_to_message_id``); adapters that lack
+    external protocol supports a reply-to primitive worth carrying (the WeChat
+    gateway's ``msg_id``, Telegram's ``reply_to_message_id``); adapters that lack
     one leave it ``None``.
     """
 
@@ -54,7 +54,7 @@ class IncomingMessage:
     target: ChannelTarget
     text: str
     msg_type: str
-    direction: str  # ``inbound`` / ``outbound`` (per Wisdom's schema)
+    direction: str  # ``inbound`` / ``outbound`` (per the gateway's schema)
     upstream_id: str | None = None
     received_at_ms: int | None = None
     raw: dict[str, Any] = field(default_factory=dict)

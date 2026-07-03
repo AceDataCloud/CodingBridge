@@ -105,6 +105,11 @@ class Settings:
     def credentials_path(self) -> Path:
         return self.config_dir / "credentials.json"
 
+    @property
+    def channels_config_path(self) -> Path:
+        """Location of the optional TOML file describing channel adapters."""
+        return self.config_dir / "channels.toml"
+
     @classmethod
     def from_env(cls) -> Settings:
         def _f(name: str, default: float) -> float:

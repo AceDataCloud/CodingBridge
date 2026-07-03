@@ -382,3 +382,125 @@ class TestSettingsIntegration:
 
         s = Settings(config_dir=tmp_path)
         assert s.channels_config_path == tmp_path / "channels.toml"
+
+
+class TestPolicyFields:
+    def test_defaults_match_channelpolicy_defaults(self) -> None:
+        from coding_bridge.channels.policy import ChannelPolicy
+
+        inst = WeChatInstanceConfig(instance_id="x", base_url="http://a", token_env="T")
+        default_policy = ChannelPolicy()
+        assert inst.trigger_prefix == default_policy.trigger_prefix
+        assert inst.allowed_senders == default_policy.allowed_senders
+        assert inst.rate_limit_per_min == default_policy.rate_limit_per_min
+        assert inst.dedup_window_seconds == default_policy.dedup_window_seconds
+
+    def test_to_policy_roundtrip(self, tmp_path: Path) -> None:
+        p = _write(
+            tmp_path,
+            """
+[[channels.wechat]]
+instance_id = "x"
+base_url = "http://a"
+token_env = "T"
+trigger_prefix = "@bot "
+allowed_senders = ["wxid_alice", "wxid_bob"]
+rate_limit_per_min = 3
+dedup_window_seconds = 60.0
+""",
+        )
+        inst = load_channels_config(p).wechat[0]
+        pol = inst.to_policy()
+        assert pol.trigger_prefix == "@bot "
+        assert pol.allowed_senders == ("wxid_alice", "wxid_bob")
+        assert pol.rate_limit_per_min == 3
+        assert pol.dedup_window_seconds == 60.0
+
+    def test_trigger_prefix_must_be_string(self) -> None:
+        with pytest.raises(ConfigError, match=r"trigger_prefix must be a string"):
+            parse_channels_config(
+                {
+                    "channels": {
+                        "wechat": [
+                            {
+                                "instance_id": "x",
+                                "base_url": "http://a",
+                                "token_env": "T",
+                                "trigger_prefix": 123,
+                            }
+                        ]
+                    }
+                }
+            )
+
+    def test_allowed_senders_must_be_list_of_nonempty_strings(self) -> None:
+        for bad in ["nope", [""], [1, 2], [None]]:
+            with pytest.raises(ConfigError, match=r"allowed_senders"):
+                parse_channels_config(
+                    {
+                        "channels": {
+                            "wechat": [
+                                {
+                                    "instance_id": "x",
+                                    "base_url": "http://a",
+                                    "token_env": "T",
+                                    "allowed_senders": bad,
+                                }
+                            ]
+                        }
+                    }
+                )
+
+    def test_rate_limit_must_be_non_negative_int(self) -> None:
+        for bad in [-1, "high", True, 3.5]:
+            with pytest.raises(ConfigError, match=r"rate_limit_per_min"):
+                parse_channels_config(
+                    {
+                        "channels": {
+                            "wechat": [
+                                {
+                                    "instance_id": "x",
+                                    "base_url": "http://a",
+                                    "token_env": "T",
+                                    "rate_limit_per_min": bad,
+                                }
+                            ]
+                        }
+                    }
+                )
+
+    def test_dedup_window_validated(self) -> None:
+        for bad in [-1, "long", True]:
+            with pytest.raises(ConfigError, match=r"dedup_window"):
+                parse_channels_config(
+                    {
+                        "channels": {
+                            "wechat": [
+                                {
+                                    "instance_id": "x",
+                                    "base_url": "http://a",
+                                    "token_env": "T",
+                                    "dedup_window_seconds": bad,
+                                }
+                            ]
+                        }
+                    }
+                )
+
+    def test_dedup_window_nan_and_inf_rejected(self) -> None:
+        for bad in [float("nan"), float("inf"), float("-inf")]:
+            with pytest.raises(ConfigError, match=r"dedup_window_seconds must be finite"):
+                parse_channels_config(
+                    {
+                        "channels": {
+                            "wechat": [
+                                {
+                                    "instance_id": "x",
+                                    "base_url": "http://a",
+                                    "token_env": "T",
+                                    "dedup_window_seconds": bad,
+                                }
+                            ]
+                        }
+                    }
+                )

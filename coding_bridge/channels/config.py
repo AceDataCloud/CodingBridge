@@ -37,11 +37,15 @@ Design notes:
 
 from __future__ import annotations
 
+import math
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse
+
+if TYPE_CHECKING:
+    from .policy import ChannelPolicy
 
 try:
     import tomllib as _toml
@@ -49,7 +53,18 @@ except ModuleNotFoundError:  # Python 3.10
     import tomli as _toml  # type: ignore[import-not-found]
 
 _WECHAT_KEYS = frozenset(
-    {"instance_id", "base_url", "token_env", "token_file", "enabled", "default_provider"}
+    {
+        "instance_id",
+        "base_url",
+        "token_env",
+        "token_file",
+        "enabled",
+        "default_provider",
+        "trigger_prefix",
+        "allowed_senders",
+        "rate_limit_per_min",
+        "dedup_window_seconds",
+    }
 )
 _CHANNELS_KEYS = frozenset({"wechat"})
 
@@ -76,6 +91,33 @@ class WeChatInstanceConfig:
     token_file: str | None = None
     enabled: bool = False
     default_provider: str | None = None
+    #: Message text must start with this to be forwarded. Empty string disables
+    #: the check. See ``coding_bridge.channels.policy.ChannelPolicy``.
+    trigger_prefix: str = "/ask "
+    #: Sender allowlist. Empty tuple = allow all (still gated by the WeChat
+    #: gateway token). Stored as tuple because ``WeChatInstanceConfig`` is frozen.
+    allowed_senders: tuple[str, ...] = ()
+    #: Sliding-window rate limit per sender_id over the last 60 s.
+    rate_limit_per_min: int = 6
+    #: Dedup window for repeat upstream ``msg_id`` (upstream retries). ``0``
+    #: disables dedup.
+    dedup_window_seconds: float = 300.0
+
+    def to_policy(self) -> ChannelPolicy:
+        """Build the runtime ``ChannelPolicy`` this instance describes."""
+        # Local import to avoid a circular module cycle
+        # (policy → base → nothing config-specific; config → policy would loop
+        # only at type-annotation time, but keep the runtime import lazy so
+        # ``coding_bridge.channels.config`` alone still loads without importing
+        # the whole channels stack).
+        from .policy import ChannelPolicy
+
+        return ChannelPolicy(
+            trigger_prefix=self.trigger_prefix,
+            allowed_senders=self.allowed_senders,
+            rate_limit_per_min=self.rate_limit_per_min,
+            dedup_window_seconds=self.dedup_window_seconds,
+        )
 
     def resolve_token(self, environ: dict[str, str] | None = None) -> str:
         """Load the token from env var or secrets file. Never logs it.
@@ -198,6 +240,50 @@ def _parse_wechat(block: dict[str, Any], index: int) -> WeChatInstanceConfig:
         raise ConfigError(
             f"[[channels.wechat]] {instance_id!r}: default_provider must be a string"
         )
+
+    trigger_prefix = block.get("trigger_prefix", "/ask ")
+    if not isinstance(trigger_prefix, str):
+        raise ConfigError(
+            f"[[channels.wechat]] {instance_id!r}: trigger_prefix must be a string"
+        )
+
+    allowed_senders_raw = block.get("allowed_senders", [])
+    if not isinstance(allowed_senders_raw, list) or not all(
+        isinstance(x, str) and x for x in allowed_senders_raw
+    ):
+        raise ConfigError(
+            f"[[channels.wechat]] {instance_id!r}: allowed_senders must be a "
+            "list of non-empty strings"
+        )
+
+    rate_limit = block.get("rate_limit_per_min", 6)
+    # Bool is a subclass of int in Python — reject explicit bools to catch
+    # `rate_limit_per_min = true` typos.
+    if isinstance(rate_limit, bool) or not isinstance(rate_limit, int) or rate_limit < 0:
+        raise ConfigError(
+            f"[[channels.wechat]] {instance_id!r}: rate_limit_per_min must be "
+            "a non-negative int"
+        )
+
+    dedup_window = block.get("dedup_window_seconds", 300.0)
+    if isinstance(dedup_window, bool) or not isinstance(dedup_window, (int, float)):
+        raise ConfigError(
+            f"[[channels.wechat]] {instance_id!r}: dedup_window_seconds must "
+            "be a number"
+        )
+    # NaN < 0 is False so a plain range check misses it — reject explicitly
+    # so ``_prune_dedup`` never sees a non-comparable value.
+    if math.isnan(dedup_window) or math.isinf(dedup_window):
+        raise ConfigError(
+            f"[[channels.wechat]] {instance_id!r}: dedup_window_seconds must "
+            "be finite"
+        )
+    if dedup_window < 0:
+        raise ConfigError(
+            f"[[channels.wechat]] {instance_id!r}: dedup_window_seconds must "
+            "be >= 0"
+        )
+
     return WeChatInstanceConfig(
         instance_id=instance_id,
         base_url=base_url.rstrip("/"),
@@ -205,6 +291,10 @@ def _parse_wechat(block: dict[str, Any], index: int) -> WeChatInstanceConfig:
         token_file=token_file,
         enabled=enabled,
         default_provider=default_provider,
+        trigger_prefix=trigger_prefix,
+        allowed_senders=tuple(allowed_senders_raw),
+        rate_limit_per_min=rate_limit,
+        dedup_window_seconds=float(dedup_window),
     )
 
 

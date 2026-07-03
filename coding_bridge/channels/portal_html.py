@@ -100,6 +100,20 @@ select#inst{width:auto;min-width:170px}
 .appr .btn{padding:7px 14px}
 .btn.approve{background:var(--ok);color:#fff}
 .btn.deny{background:transparent;color:var(--danger);border:1px solid var(--danger)}
+.chanlist{display:flex;flex-direction:column;gap:6px;margin-top:6px}
+.chan{display:flex;align-items:center;gap:12px;padding:11px 12px;border:1px solid var(--border);border-radius:12px;cursor:pointer;background:var(--bg)}
+.chan:hover{border-color:var(--accent)}
+.chan.active{border-color:var(--accent);box-shadow:0 0 0 3px color-mix(in srgb,var(--accent) 20%,transparent)}
+.chan .nm{font-weight:600;font-size:14px}
+.chan .id{color:var(--muted);font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.chan-ic{width:34px;height:34px;border-radius:9px;display:grid;place-items:center;color:#fff;font-weight:700;font-size:16px;flex:0 0 auto}
+.chan-ic.wechat{background:#09b83e}
+.chan-ic.telegram{background:#2aabee}
+.badge{display:inline-block;margin-left:8px;font-size:10.5px;font-weight:700;text-transform:uppercase;letter-spacing:.03em;padding:2px 7px;border-radius:999px;background:var(--chip);color:var(--chip-fg);vertical-align:middle}
+.badge.telegram{background:#e8f6fd;color:#1c7ab5}
+.badge.wechat{background:#e7f8ec;color:#12833a}
+textarea.ta{width:100%;padding:9px 11px;border:1px solid var(--border);border-radius:10px;background:var(--bg);color:var(--fg);font:inherit;resize:vertical;min-height:64px;outline:none}
+textarea.ta:focus{border-color:var(--accent);box-shadow:0 0 0 3px color-mix(in srgb,var(--accent) 25%,transparent)}
 </style>
 </head>
 <body>
@@ -107,7 +121,7 @@ select#inst{width:auto;min-width:170px}
   <header class="top">
     <div class="logo">CB</div>
     <div>
-      <h1>Channels · WeChat</h1>
+      <h1>Channels</h1>
       <div class="sub" id="cfgpath">loading config…</div>
     </div>
     <div style="margin-left:auto" id="instwrap"></div>
@@ -160,10 +174,16 @@ async function load(){
   stopQrPoll(); stopApprovalPoll();
   const cfg=await api("/api/config"); STATE.instances=cfg.instances; STATE.idx=0;
   $("#cfgpath").textContent=cfg.config_path;
-  renderInstSelect();
+  $("#instwrap").innerHTML="";
   if(!STATE.instances.length){ $("#app").innerHTML=""; $("#app").append(noInstances()); $("#bar").style.display="none"; return; }
   $("#bar").style.display="block"; render();
-  loadAccount(); loadGroups(); warmContacts(); startApprovalPoll();
+  loadForCurrent(); startApprovalPoll();
+}
+
+function loadForCurrent(){
+  const it=current(); if(!it) return;
+  if(it.type==="telegram"){ loadTelegramStatus(); }
+  else { loadAccount(); loadGroups(); warmContacts(); }
 }
 
 function warmContacts(){
@@ -213,55 +233,50 @@ async function decide(id, decision){
 
 function noInstances(){
   return el("div",{class:"card"},
-    el("h2",{},"No WeChat instance configured"),
-    el("p",{class:"hint"},"Run `coding-bridge channels init`, set base_url + a token env var, then reload. The portal edits existing instances."));
+    el("h2",{},"No channels configured"),
+    el("p",{class:"hint"},"Run `coding-bridge channels init`, add a [[channels.wechat]] or [[channels.telegram]] block with a token, then reload. The portal edits existing instances."));
 }
 
-function renderInstSelect(){
-  const w=$("#instwrap"); w.innerHTML="";
-  if(STATE.instances.length<=1) return;
-  const sel=el("select",{id:"inst",onchange:e=>{stopQrPoll();STATE.idx=+e.target.value;render();loadAccount();loadGroups();warmContacts();}});
-  STATE.instances.forEach((it,i)=>sel.append(el("option",{value:i},it.instance_id)));
-  w.append(sel);
+function chanIcon(type){ return el("div",{class:"chan-ic "+type}, type==="telegram"?"✈":"微"); }
+
+function renderOverview(){
+  const card=el("div",{class:"card",id:"overview"},
+    el("h2",{},"Channels — "+STATE.instances.length),
+    el("p",{class:"hint"},"Every configured channel. Click one to edit it; the editor adapts to each channel type."));
+  const list=el("div",{class:"chanlist"});
+  STATE.instances.forEach((it,i)=>{
+    const active=i===STATE.idx;
+    list.append(el("div",{class:"chan"+(active?" active":""),onclick:()=>select(i)},
+      chanIcon(it.type),
+      el("div",{style:"flex:1;min-width:0"},
+        el("div",{class:"nm"}, it.instance_id, el("span",{class:"badge "+it.type}, it.type)),
+        el("div",{class:"id"}, it.type==="telegram"?(it.api_base||"telegram"):it.base_url)),
+      el("span",{class:"pill"}, el("span",{class:"dot"+(it.enabled?"":" off")}), it.enabled?"enabled":"disabled")));
+  });
+  card.append(list);
+  return card;
+}
+
+function refreshOverview(){
+  const cur=$("#overview"); if(cur) cur.replaceWith(renderOverview());
+}
+
+function select(i){
+  if(i===STATE.idx) return;
+  stopQrPoll(); STATE.idx=i; render(); loadForCurrent();
 }
 
 function render(){
   const it=current(); const app=$("#app"); app.innerHTML="";
   app.append(el("div",{id:"approvals"}));
+  app.append(renderOverview());
   app.append(el("div",{id:"onboarding"}));
+  if(it.type==="telegram") renderTelegramEditor(app,it);
+  else renderWeChatEditor(app,it);
+}
 
-  // account card
-  const acct=el("div",{class:"card"},
-    el("div",{class:"row"},
-      el("div",{class:"acct",id:"acct"}, avatar(null,it.instance_id), el("div",{},
-        el("div",{style:"font-weight:650"},it.instance_id),
-        el("div",{class:"pill",id:"acctline"}, it.base_url))),
-      el("label",{class:"switch",style:"margin-left:auto",title:"Enabled"},
-        el("input",{type:"checkbox",...(it.enabled?{checked:"checked"}:{}),onchange:e=>{it.enabled=e.target.checked;}}),
-        el("span",{class:"slider"}))));
-  app.append(acct);
-  if(!it.token_resolvable){
-    acct.append(el("p",{class:"hint",style:"color:var(--danger);margin:12px 0 0"},
-      "⚠ Token not resolvable ("+(it.token_source.kind==="none"?"no token_env/token_file set":it.token_source.kind+": "+it.token_source.ref)+"). Contacts/groups won't load until it's set."));
-  }
-
-  // access card
-  const access=el("div",{class:"card"},
-    el("h2",{},"Access — who can drive the bot"),
-    el("p",{class:"hint"},"Only these people (by WeChat id) trigger a turn. Empty = anyone who can message the bot. Search your contacts:"));
-  const search=el("div",{class:"search"},
-    el("input",{type:"text",id:"q",placeholder:"Search name or WeChat id…",autocomplete:"off"}),
-    el("div",{class:"results",id:"results"}));
-  access.append(search);
-  const chips=el("div",{class:"chips",id:"chips"}); access.append(chips);
-  app.append(access);
-  renderChips();
-  const q=$("#q");
-  let dbt; q.addEventListener("input",()=>{clearTimeout(dbt);dbt=setTimeout(()=>doSearch(q.value),200);});
-  q.addEventListener("focus",()=>{ if(q.value)doSearch(q.value); });
-  document.addEventListener("click",e=>{ if(!search.contains(e.target))$("#results").classList.remove("show"); });
-
-  // behavior card
+function behaviorCard(it,opts){
+  opts=opts||{};
   const freeform=it.free_form!==false && (it.trigger_prefix===""||it.free_form===true);
   const beh=el("div",{class:"card"},
     el("h2",{},"Behavior"),
@@ -283,7 +298,60 @@ function render(){
   const rl=el("input",{type:"number",id:"rl",min:"0",value:String(it.rate_limit_per_min)});
   rl.addEventListener("input",()=>{const v=parseInt(rl.value||"0",10);it.rate_limit_per_min=isNaN(v)?0:Math.max(0,v);});
   beh.append(rl);
-  app.append(beh);
+  if(opts.dedup){
+    beh.append(el("label",{class:"fld"},"Dedup window (seconds, 0 = off)"));
+    const dd=el("input",{type:"number",id:"dedup",min:"0",step:"1",value:String(it.dedup_window_seconds)});
+    dd.addEventListener("input",()=>{const v=parseFloat(dd.value||"0");it.dedup_window_seconds=isNaN(v)?0:Math.max(0,v);});
+    beh.append(dd);
+  }
+  return beh;
+}
+
+function safetyCard(it){
+  const card=el("div",{class:"card"},
+    el("h2",{},"Safety"),
+    el("p",{class:"hint"},"Require approval holds every tool action for Approve/Deny in this portal instead of running unattended."));
+  card.append(el("label",{class:"row",style:"cursor:pointer;gap:12px"},
+    el("label",{class:"switch"},
+      el("input",{type:"checkbox",id:"reqappr",...(it.require_approval?{checked:"checked"}:{}),onchange:e=>{it.require_approval=e.target.checked;}}),
+      el("span",{class:"slider"})),
+    el("div",{}, el("div",{style:"font-weight:600"},"Require approval for tool use"),
+      el("div",{class:"pill"},"Off = run tools unattended (default)"))));
+  return card;
+}
+
+function renderWeChatEditor(app,it){
+  // account card
+  const acct=el("div",{class:"card"},
+    el("div",{class:"row"},
+      el("div",{class:"acct",id:"acct"}, avatar(null,it.instance_id), el("div",{},
+        el("div",{style:"font-weight:650"},it.instance_id),
+        el("div",{class:"pill",id:"acctline"}, it.base_url))),
+      el("label",{class:"switch",style:"margin-left:auto",title:"Enabled"},
+        el("input",{type:"checkbox",...(it.enabled?{checked:"checked"}:{}),onchange:e=>{it.enabled=e.target.checked;refreshOverview();}}),
+        el("span",{class:"slider"}))));
+  app.append(acct);
+  if(!it.token_resolvable){
+    acct.append(el("p",{class:"hint",style:"color:var(--danger);margin:12px 0 0"},
+      "⚠ Token not resolvable ("+(it.token_source.kind==="none"?"no token_env/token_file set":it.token_source.kind+": "+it.token_source.ref)+"). Contacts/groups won't load until it's set."));
+  }
+
+  // access card
+  const access=el("div",{class:"card"},
+    el("h2",{},"Access — who can drive the bot"),
+    el("p",{class:"hint"},"Only these people (by WeChat id) trigger a turn. Empty = anyone who can message the bot. Search your contacts:"));
+  const search=el("div",{class:"search"},
+    el("input",{type:"text",id:"q",placeholder:"Search name or WeChat id…",autocomplete:"off"}),
+    el("div",{class:"results",id:"results"}));
+  access.append(search);
+  const chips=el("div",{class:"chips",id:"chips"}); access.append(chips);
+  app.append(access);
+  renderChips();
+  const q=$("#q");
+  let dbt; q.addEventListener("input",()=>{clearTimeout(dbt);dbt=setTimeout(()=>doSearch(q.value),200);});
+  q.addEventListener("focus",()=>{ if(q.value)doSearch(q.value); });
+
+  app.append(behaviorCard(it));
 
   // groups — allowed_groups picker
   const g=el("div",{class:"card"},
@@ -291,6 +359,68 @@ function render(){
     el("p",{class:"hint"},"Check groups to restrict the bot to only those. None checked = it may answer in every group it's in (still gated by prefix/sender). Keep a prefix in busy groups."),
     el("div",{class:"grouplist",id:"groups"}, el("div",{class:"empty"},"loading…")));
   app.append(g);
+
+  app.append(safetyCard(it));
+}
+
+function renderTelegramEditor(app,it){
+  // account / token-status card
+  const acct=el("div",{class:"card"},
+    el("div",{class:"row"},
+      el("div",{class:"acct"}, chanIcon("telegram"), el("div",{},
+        el("div",{style:"font-weight:650"}, it.instance_id, el("span",{class:"badge telegram"},"telegram")),
+        el("div",{class:"pill"}, it.api_base))),
+      el("label",{class:"switch",style:"margin-left:auto",title:"Enabled"},
+        el("input",{type:"checkbox",...(it.enabled?{checked:"checked"}:{}),onchange:e=>{it.enabled=e.target.checked;refreshOverview();}}),
+        el("span",{class:"slider"}))));
+  app.append(acct);
+  if(!it.token_resolvable){
+    acct.append(el("p",{class:"hint",style:"color:var(--danger);margin:12px 0 0"},
+      "⚠ Bot token not resolvable ("+(it.token_source.kind==="none"?"no token_env/token_file set":it.token_source.kind+": "+it.token_source.ref)+"). Create a bot with @BotFather and set the token env var."));
+  } else {
+    acct.append(el("div",{class:"pill",id:"tgstatus",style:"margin-top:10px"},"checking bot token…"));
+  }
+
+  // access — manual sender-id allowlist
+  const access=el("div",{class:"card"},
+    el("h2",{},"Access — who can drive the bot"),
+    el("p",{class:"hint"},"Telegram numeric user IDs, one per line. Empty = anyone who can message the bot. Message @userinfobot to find an id."));
+  const senders=el("textarea",{class:"ta",id:"tgsenders",rows:"3",placeholder:"123456789\n987654321",autocomplete:"off",spellcheck:"false"});
+  senders.value=(it.allowed_senders||[]).join("\n");
+  senders.addEventListener("input",()=>{ it.allowed_senders=splitLines(senders.value); });
+  access.append(senders);
+  app.append(access);
+
+  app.append(behaviorCard(it,{dedup:true}));
+
+  // groups — manual chat-id allowlist
+  const g=el("div",{class:"card"},
+    el("h2",{},"Groups — where the bot may answer"),
+    el("p",{class:"hint"},"Group / supergroup chat IDs (usually negative), one per line. Empty = every group the bot is in. Disable the bot's privacy mode in @BotFather to receive group messages."));
+  const groups=el("textarea",{class:"ta",id:"tggroups",rows:"3",placeholder:"-1001234567890",autocomplete:"off",spellcheck:"false"});
+  groups.value=(it.allowed_groups||[]).join("\n");
+  groups.addEventListener("input",()=>{ it.allowed_groups=splitLines(groups.value); });
+  g.append(groups);
+  app.append(g);
+
+  app.append(safetyCard(it));
+
+  if(it.token_resolvable) loadTelegramStatus();
+}
+
+function splitLines(s){ return (s||"").split(/\r?\n/).map(x=>x.trim()).filter(Boolean); }
+
+async function loadTelegramStatus(){
+  const it=current(); if(!it||it.type!=="telegram"||!it.token_resolvable) return;
+  const box=$("#tgstatus"); if(!box) return;
+  try{
+    const s=await api("/api/telegram/status?instance="+encodeURIComponent(it.instance_id));
+    box.innerHTML=""; box.append(el("span",{class:"dot"}),
+      document.createTextNode(" bot "+(s.username?("@"+s.username):("id "+(s.id||"?")))+" — token OK"));
+  }catch(e){
+    box.innerHTML=""; box.append(el("span",{class:"dot off"}),
+      document.createTextNode(" "+String(e.message||"token check failed")));
+  }
 }
 
 function setTrigger(free){
@@ -405,25 +535,39 @@ async function loadGroups(){
 async function save(){
   const btn=$("#save"); btn.disabled=true;
   try{
-    const payload={instances:STATE.instances.map(it=>({
-      instance_id:it.instance_id, base_url:it.base_url,
-      token_env:it.token_source.kind==="env"?it.token_source.ref:null,
-      token_file:it.token_source.kind==="file"?it.token_source.ref:null,
-      enabled:it.enabled, default_provider:it.default_provider,
-      free_form: it.free_form===true || it.trigger_prefix==="",
-      trigger_prefix: it.trigger_prefix,
-      allowed_senders: it.allowed_senders,
-      allowed_groups: it.allowed_groups,
-      rate_limit_per_min: it.rate_limit_per_min,
-      dedup_window_seconds: it.dedup_window_seconds}))};
+    const payload={instances:STATE.instances.map(it=>{
+      const o={
+        type: it.type,
+        instance_id: it.instance_id,
+        token_env: it.token_source.kind==="env"?it.token_source.ref:null,
+        token_file: it.token_source.kind==="file"?it.token_source.ref:null,
+        enabled: it.enabled,
+        require_approval: it.require_approval===true,
+        default_provider: it.default_provider,
+        free_form: it.free_form===true || it.trigger_prefix==="",
+        trigger_prefix: it.trigger_prefix,
+        allowed_senders: it.allowed_senders,
+        allowed_groups: it.allowed_groups,
+        rate_limit_per_min: it.rate_limit_per_min,
+        dedup_window_seconds: it.dedup_window_seconds};
+      if(it.type==="telegram") o.api_base=it.api_base; else o.base_url=it.base_url;
+      return o;
+    })};
     const res=await api("/api/config",{method:"POST",body:JSON.stringify(payload)});
-    STATE.instances=res.instances; toast("Saved to channels.toml"); render(); loadAccount(); loadGroups();
+    STATE.instances=res.instances; toast("Saved to channels.toml"); render(); loadForCurrent();
   }catch(e){ toast(e.message,true); }
   finally{ btn.disabled=false; }
 }
 
 $("#save").addEventListener("click",save);
 $("#reload").addEventListener("click",load);
+// One global listener (added once) closes the contact-search dropdown on an
+// outside click — avoids stacking a fresh listener on every editor render.
+document.addEventListener("click",e=>{
+  const box=$("#results"); if(!box) return;
+  const s=box.closest(".search");
+  if(s && !s.contains(e.target)) box.classList.remove("show");
+});
 load().catch(e=>{ $("#app").innerHTML=""; $("#app").append(el("div",{class:"card"},el("h2",{},"Failed to load"),el("p",{class:"hint"},String(e.message)))); });
 </script>
 </body>

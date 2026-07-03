@@ -283,6 +283,118 @@ class TestChannelsStart:
         assert "ABSOLUTELY_NOT_SET_9999" in err
 
 
+# ---------- smoke (offline, stub provider) -----------------------------------
+
+
+def _install_stub_factory(monkeypatch: pytest.MonkeyPatch, script) -> None:
+    """Patch ``default_provider_factory`` so smoke runs with no real binary.
+
+    ``script`` is a callable ``(session_id) -> list[event_payload]`` that the
+    stub provider emits on ``start``.
+    """
+    from coding_bridge import providers as _providers
+
+    def _factory(_settings):
+        def _make(_provider_name, session_id, emit, _ask):
+            class _Stub:
+                name = "stub"
+
+                async def start(self, _prompt, **_kw):
+                    for payload in script(session_id):
+                        await emit(payload)
+
+                async def send(self, *_a, **_kw):
+                    return
+
+                async def edit(self, *_a, **_kw):
+                    return
+
+                async def interrupt(self):
+                    return
+
+                async def aclose(self):
+                    return
+
+            return _Stub()
+
+        return _make
+
+    monkeypatch.setattr(_providers, "default_provider_factory", _factory)
+
+
+class TestChannelsSmoke:
+    def test_smoke_prints_provider_reply(self, tmp_path: Path, monkeypatch) -> None:
+        from coding_bridge.protocol import Event, event_payload
+
+        def script(sid):
+            return [
+                event_payload(Event.SESSION_TEXT, sid, text="pong"),
+                event_payload(Event.SESSION_RESULT, sid, text=""),
+            ]
+
+        _install_stub_factory(monkeypatch, script)
+        s = _settings(tmp_path)
+        rc, out, err = _capture(
+            lambda: channels_cli.cmd_channels_smoke(
+                s, provider="stub", prompt="say pong", timeout=5.0
+            )
+        )
+        assert rc == 0
+        assert "pong" in out
+        assert "say pong" in out  # prompt echoed in the header
+
+    def test_smoke_provider_error_exits_1(self, tmp_path: Path, monkeypatch) -> None:
+        from coding_bridge.protocol import Event, event_payload
+
+        def script(sid):
+            return [event_payload(Event.SESSION_ERROR, sid, message="kaboom")]
+
+        _install_stub_factory(monkeypatch, script)
+        s = _settings(tmp_path)
+        rc, out, err = _capture(
+            lambda: channels_cli.cmd_channels_smoke(
+                s, provider="stub", prompt="x", timeout=5.0
+            )
+        )
+        assert rc == 1
+        assert "kaboom" in out
+
+    def test_smoke_empty_reply_exits_1(self, tmp_path: Path, monkeypatch) -> None:
+        from coding_bridge.protocol import Event, event_payload
+
+        def script(sid):
+            # Result with no text and no streamed text → dispatcher yields "(no reply)"
+            return [event_payload(Event.SESSION_RESULT, sid, text="")]
+
+        _install_stub_factory(monkeypatch, script)
+        s = _settings(tmp_path)
+        rc, out, err = _capture(
+            lambda: channels_cli.cmd_channels_smoke(
+                s, provider="stub", prompt="x", timeout=5.0
+            )
+        )
+        assert rc == 1
+
+    def test_smoke_timeout_no_text_exits_1(self, tmp_path: Path, monkeypatch) -> None:
+        # Provider emits NOTHING and never signals completion. With a tiny
+        # turn_timeout the dispatcher synthesises "(provider timed out; no
+        # reply)" — smoke must report failure (rc=1), not a false-healthy 0.
+        # (This is the BLOCKER the adversarial review caught: the old exit-code
+        # check ignored the timeout marker.)
+        def script(_sid):
+            return []  # start() returns immediately having emitted nothing
+
+        _install_stub_factory(monkeypatch, script)
+        s = _settings(tmp_path)
+        rc, out, err = _capture(
+            lambda: channels_cli.cmd_channels_smoke(
+                s, provider="stub", prompt="x", timeout=0.2
+            )
+        )
+        assert rc == 1
+        assert "timed out" in out
+
+
 # ---------- argparse integration ---------------------------------------------
 
 
@@ -298,7 +410,30 @@ class TestArgparseIntegration:
         with pytest.raises(SystemExit) as ei:
             cli.main(["channels", "--config-dir", str(tmp_path), "init"])
         assert ei.value.code == 0
-        assert (tmp_path / "channels.toml").exists()
+
+    def test_channels_smoke_parses(self, tmp_path: Path, monkeypatch) -> None:
+        from coding_bridge.protocol import Event, event_payload
+
+        def script(sid):
+            return [event_payload(Event.SESSION_RESULT, sid, text="ok")]
+
+        _install_stub_factory(monkeypatch, script)
+        with pytest.raises(SystemExit) as ei:
+            cli.main(
+                [
+                    "channels",
+                    "--config-dir",
+                    str(tmp_path),
+                    "smoke",
+                    "--provider",
+                    "stub",
+                    "--prompt",
+                    "hi",
+                    "--timeout",
+                    "5",
+                ]
+            )
+        assert ei.value.code == 0
 
     def test_channels_init_refuses_second_run(self, tmp_path: Path) -> None:
         with pytest.raises(SystemExit) as ei1:

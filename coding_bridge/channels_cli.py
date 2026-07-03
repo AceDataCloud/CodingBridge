@@ -310,6 +310,100 @@ def cmd_channels_start(settings: Settings) -> int:
     return 0
 
 
+# ---------- smoke -------------------------------------------------------------
+
+
+def cmd_channels_smoke(
+    settings: Settings, *, provider: str, prompt: str, timeout: float
+) -> int:
+    """Run one real provider turn locally — no channel, no gateway, no network.
+
+    This is the ``claude`` / ``codex`` end-to-end check an operator runs BEFORE
+    going live: it drives the exact same ``SessionDispatcher`` turn machinery a
+    real inbound message would, but feeds a canned prompt through an in-memory
+    adapter and prints the reply to stdout. If this prints a sane answer, the
+    provider binary + auth + dispatcher wiring are all good; the only remaining
+    variable for ``channels start`` is the WeChat gateway token (covered by ``doctor``).
+
+    Exit codes: 0 = provider replied, 1 = provider error / empty / timeout.
+    """
+    from .channels.base import ChannelTarget, IncomingMessage, SendResult
+    from .channels.dispatcher import SessionDispatcher
+
+    # Imported at call time (not module top) so tests can monkeypatch
+    # `coding_bridge.providers.default_provider_factory` before we resolve it,
+    # and so the heavy provider deps stay out of the CLI import path.
+    from .providers import default_provider_factory
+
+    captured: dict[str, str] = {}
+
+    class _StdoutAdapter:
+        name = "smoke"
+        instance_id = "local"
+
+        def set_handler(self, _h) -> None:  # not used — we call the dispatcher directly
+            return
+
+        async def run(self) -> None:
+            return
+
+        async def send(self, _target, text, *, reply_to=None):
+            captured["reply"] = text
+            return SendResult(ok=True, upstream_id="local", latency_ms=0)
+
+        async def aclose(self) -> None:
+            return
+
+    async def _run() -> None:
+        dispatcher = SessionDispatcher(
+            settings,
+            default_provider_factory(settings),
+            turn_timeout=timeout,
+            default_provider=provider,
+        )
+        adapter = _StdoutAdapter()
+        msg = IncomingMessage(
+            sender_id="smoke-local",
+            sender_name="smoke",
+            target=ChannelTarget(conversation_id="smoke-local"),
+            text=prompt,
+            msg_type="text",
+            direction="inbound",
+        )
+        try:
+            await dispatcher.handle_message(msg, adapter)
+            # Poll until the fire-and-forget turn posts a reply (bounded by
+            # turn_timeout + a small slack so we never hang forever).
+            deadline = timeout + 5.0
+            waited = 0.0
+            while "reply" not in captured and waited < deadline:
+                await asyncio.sleep(0.05)
+                waited += 0.05
+        finally:
+            await dispatcher.aclose()
+
+    print(f"Provider: {provider}")
+    print(f"Prompt:   {prompt!r}")
+    print("Running one turn locally (no channel/network)...")
+    asyncio.run(_run())
+
+    reply = captured.get("reply")
+    if not reply:
+        print("✗ no reply (provider timed out or produced nothing)", file=sys.stderr)
+        return 1
+    print("--- reply ---")
+    print(reply)
+    print("-------------")
+    # The dispatcher synthesises these sentinel strings for the failure paths
+    # (see SessionDispatcher._run_turn). A smoke run that lands on any of them
+    # must exit non-zero — a timed-out or errored provider is NOT a healthy
+    # setup even though it technically produced "a reply".
+    failure_markers = ("(provider error:", "(provider timed out")
+    if reply == "(no reply)" or reply.startswith(failure_markers):
+        return 1
+    return 0
+
+
 # ---------- argparse wiring ---------------------------------------------------
 
 
@@ -341,6 +435,29 @@ def register_subparsers(
     )
     p_doctor.set_defaults(func=_dispatch_doctor)
 
+    p_smoke = sub.add_parser(
+        "smoke",
+        help="Run one real provider turn locally (no channel/network) to verify setup",
+        parents=[common],
+    )
+    p_smoke.add_argument(
+        "--provider",
+        default="claude",
+        help="Provider to smoke-test (claude/codex/copilot). Default: claude.",
+    )
+    p_smoke.add_argument(
+        "--prompt",
+        default="Reply with the single word: pong",
+        help="Prompt to send. Default asks the model to reply 'pong'.",
+    )
+    p_smoke.add_argument(
+        "--timeout",
+        type=float,
+        default=120.0,
+        help="Seconds to wait for the provider turn. Default: 120.",
+    )
+    p_smoke.set_defaults(func=_dispatch_smoke)
+
 
 def _dispatch_init(args: argparse.Namespace) -> None:
     from .cli import _build_settings  # local import to avoid circular
@@ -360,9 +477,23 @@ def _dispatch_doctor(args: argparse.Namespace) -> None:
     raise SystemExit(cmd_channels_doctor(_build_settings(args)))
 
 
+def _dispatch_smoke(args: argparse.Namespace) -> None:
+    from .cli import _build_settings
+
+    raise SystemExit(
+        cmd_channels_smoke(
+            _build_settings(args),
+            provider=args.provider,
+            prompt=args.prompt,
+            timeout=args.timeout,
+        )
+    )
+
+
 __all__ = [
     "cmd_channels_doctor",
     "cmd_channels_init",
+    "cmd_channels_smoke",
     "cmd_channels_start",
     "register_subparsers",
 ]

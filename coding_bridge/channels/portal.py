@@ -31,6 +31,7 @@ import secrets
 import tempfile
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -195,6 +196,9 @@ class PortalService:
         self._owns_client = client is None
         self._contacts_cache: dict[str, tuple[float, list[dict[str, Any]]]] = {}
         self._lock = threading.Lock()
+        # Per-instance single-flight lock so overlapping searches (and the
+        # background warm) share ONE fetch instead of each paging 4k+ rows.
+        self._fetch_locks: dict[str, threading.Lock] = {}
 
     def close(self) -> None:
         if self._owns_client:
@@ -255,19 +259,24 @@ class PortalService:
 
     # ---- WeChat gateway proxy ------------------------------------------- #
 
-    def _gateway_get(self, inst: WeChatInstanceConfig, path: str, params: dict[str, Any]) -> Any:
+    def _gateway_request(
+        self, inst: WeChatInstanceConfig, method: str, path: str, params: dict[str, Any]
+    ) -> httpx.Response:
         try:
             token = inst.resolve_token()
         except ConfigError as exc:
             raise PortalError(400, str(exc)) from None
         url = f"{inst.base_url}{path}"
         try:
-            resp = self._client.get(
-                url, params=params, headers={"Authorization": f"Bearer {token}"}
+            return self._client.request(
+                method, url, params=params, headers={"Authorization": f"Bearer {token}"}
             )
         except httpx.HTTPError as exc:
             raise PortalError(502, f"gateway unreachable: {exc.__class__.__name__}") from None
-        if resp.status_code == 401 or resp.status_code == 403:
+
+    def _gateway_get(self, inst: WeChatInstanceConfig, path: str, params: dict[str, Any]) -> Any:
+        resp = self._gateway_request(inst, "GET", path, params)
+        if resp.status_code in (401, 403):
             raise PortalError(502, "gateway rejected the token (check token_env/token_file)")
         if resp.status_code >= 400:
             raise PortalError(502, f"gateway returned {resp.status_code}")
@@ -281,6 +290,56 @@ class PortalService:
 
     def status(self, instance_id: str) -> dict[str, Any]:
         return self._gateway_get(self._instance(instance_id), "/api/auth/status", {})
+
+    def qr(self, instance_id: str) -> dict[str, Any]:
+        """Fetch a login QR (base64 PNG), resolving the gateway's async UI task.
+
+        The gateway's ``/api/auth/qr`` returns a queued ``UiTaskOut``; the image
+        lands in ``result`` once the task finishes, so we poll ``/api/tasks/{id}``
+        server-side and hand the browser a ready-to-render data URL. Returns 409
+        (surfaced as such) when the account is already logged in.
+        """
+        inst = self._instance(instance_id)
+        resp = self._gateway_request(inst, "GET", "/api/auth/qr", {"type": "base64"})
+        if resp.status_code == 409:
+            raise PortalError(409, "already logged in")
+        if resp.status_code in (401, 403):
+            raise PortalError(502, "gateway rejected the token (check token_env/token_file)")
+        if resp.status_code >= 400:
+            raise PortalError(502, f"gateway returned {resp.status_code}")
+        try:
+            task = resp.json()
+        except ValueError:
+            raise PortalError(502, "gateway returned non-JSON") from None
+        result = self._resolve_ui_task(inst, task)
+        b64 = result.get("base64") if isinstance(result, dict) else None
+        if not b64 or not isinstance(b64, str):
+            raise PortalError(502, "gateway did not return a QR image")
+        return {"base64": b64}
+
+    def _resolve_ui_task(
+        self, inst: WeChatInstanceConfig, task: Any, *, attempts: int = 25, delay: float = 0.4
+    ) -> Any:
+        """Return a UI task's ``result``, polling ``/api/tasks/{id}`` until it lands."""
+        if not isinstance(task, dict):
+            raise PortalError(502, "gateway returned a malformed task")
+        if task.get("result"):
+            return task["result"]
+        task_id = task.get("id")
+        if not task_id or not isinstance(task_id, str):
+            raise PortalError(502, "gateway task has no id")
+        for _ in range(attempts):
+            time.sleep(delay)
+            polled = self._gateway_get(inst, f"/api/tasks/{task_id}", {})
+            if not isinstance(polled, dict):
+                continue
+            if polled.get("result"):
+                return polled["result"]
+            err = polled.get("error")
+            if err:
+                msg = err.get("message") if isinstance(err, dict) else None
+                raise PortalError(502, f"gateway task failed: {msg or 'error'}")
+        raise PortalError(504, "gateway QR task timed out")
 
     def groups(self, instance_id: str) -> list[dict[str, Any]]:
         inst = self._instance(instance_id)
@@ -308,45 +367,86 @@ class PortalService:
         ]
 
     def _contacts(self, inst: WeChatInstanceConfig) -> list[dict[str, Any]]:
-        now = time.monotonic()
-        with self._lock:
+        def _fresh() -> list[dict[str, Any]] | None:
             cached = self._contacts_cache.get(inst.instance_id)
-            if cached and now - cached[0] < _CONTACTS_TTL_SECONDS:
+            if cached and time.monotonic() - cached[0] < _CONTACTS_TTL_SECONDS:
                 return cached[1]
-        contacts = self._fetch_all_contacts(inst)
+            return None
+
         with self._lock:
-            self._contacts_cache[inst.instance_id] = (now, contacts)
-        return contacts
+            hit = _fresh()
+            if hit is not None:
+                return hit
+            fetch_lock = self._fetch_locks.get(inst.instance_id)
+            if fetch_lock is None:
+                fetch_lock = threading.Lock()
+                self._fetch_locks[inst.instance_id] = fetch_lock
+        # Single-flight: the first caller fetches; concurrent callers block here
+        # and then reuse the just-populated cache instead of refetching.
+        with fetch_lock:
+            with self._lock:
+                hit = _fresh()
+                if hit is not None:
+                    return hit
+            contacts = self._fetch_all_contacts(inst)
+            with self._lock:
+                self._contacts_cache[inst.instance_id] = (time.monotonic(), contacts)
+            return contacts
+
+    @staticmethod
+    def _normalize_contacts(rows: Any) -> list[dict[str, Any]]:
+        out: list[dict[str, Any]] = []
+        if not isinstance(rows, list):
+            return out
+        for c in rows:
+            if not isinstance(c, dict):
+                continue
+            wxid = c.get("wechat_id") or ""
+            nickname = c.get("nickname") or ""
+            remark = c.get("remark") or ""
+            alias = c.get("alias") or ""
+            out.append(
+                {
+                    "wechat_id": wxid,
+                    "nickname": nickname,
+                    "remark": remark,
+                    "avatar_url": c.get("avatar_url"),
+                    "_haystack": f"{wxid} {nickname} {remark} {alias}".lower(),
+                }
+            )
+        return out
+
+    def _fetch_page(self, inst: WeChatInstanceConfig, offset: int) -> list[dict[str, Any]]:
+        try:
+            data = self._gateway_get(
+                inst,
+                "/api/contacts",
+                {"limit": _CONTACTS_PAGE, "offset": offset, "type": "friend"},
+            )
+        except PortalError:
+            # Best-effort: a single transient page failure shouldn't fail the
+            # whole search — the target contact is likely on another page.
+            return []
+        return self._normalize_contacts(data.get("contacts") if isinstance(data, dict) else None)
 
     def _fetch_all_contacts(self, inst: WeChatInstanceConfig) -> list[dict[str, Any]]:
-        out: list[dict[str, Any]] = []
-        offset = 0
-        while offset < _CONTACTS_MAX:
-            data = self._gateway_get(
-                inst, "/api/contacts", {"limit": _CONTACTS_PAGE, "offset": offset}
-            )
-            rows = data.get("contacts", []) if isinstance(data, dict) else []
-            if not rows:
-                break
-            for c in rows:
-                if not isinstance(c, dict):
-                    continue
-                wxid = c.get("wechat_id") or ""
-                nickname = c.get("nickname") or ""
-                remark = c.get("remark") or ""
-                alias = c.get("alias") or ""
-                out.append(
-                    {
-                        "wechat_id": wxid,
-                        "nickname": nickname,
-                        "remark": remark,
-                        "avatar_url": c.get("avatar_url"),
-                        "_haystack": f"{wxid} {nickname} {remark} {alias}".lower(),
-                    }
-                )
-            if len(rows) < _CONTACTS_PAGE:
-                break
-            offset += _CONTACTS_PAGE
+        first = self._gateway_get(
+            inst, "/api/contacts", {"limit": _CONTACTS_PAGE, "offset": 0, "type": "friend"}
+        )
+        rows0 = first.get("contacts") if isinstance(first, dict) else None
+        out = self._normalize_contacts(rows0)
+        if not isinstance(rows0, list) or len(rows0) < _CONTACTS_PAGE:
+            return out
+        total = first.get("total") if isinstance(first, dict) else None
+        hi = total if isinstance(total, int) and 0 < total <= _CONTACTS_MAX else _CONTACTS_MAX
+        offsets = list(range(_CONTACTS_PAGE, hi, _CONTACTS_PAGE))
+        if not offsets:
+            return out
+        # Fetch the remaining pages concurrently — the gateway caps limit at 200,
+        # so a few thousand friends is otherwise ~20 serial round-trips.
+        with ThreadPoolExecutor(max_workers=6) as pool:
+            for rows in pool.map(lambda o: self._fetch_page(inst, o), offsets):
+                out.extend(rows)
         return out
 
 
@@ -497,6 +597,8 @@ def _make_handler(service: PortalService, token: str, port: int) -> type[BaseHTT
                     self._send_json(200, service.account(instance))
                 elif path == "/api/wechat/status":
                     self._send_json(200, service.status(instance))
+                elif path == "/api/wechat/qr":
+                    self._send_json(200, service.qr(instance))
                 elif path == "/api/wechat/groups":
                     self._send_json(200, {"groups": service.groups(instance)})
                 elif path == "/api/wechat/contacts":

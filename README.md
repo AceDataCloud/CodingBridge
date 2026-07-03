@@ -201,6 +201,8 @@ token printed to the console) that talks to your WeChat gateway so you can:
   to every message; Prefix = only when a message starts with `/ask `);
 - **pick which groups the bot may answer in** (checkboxes → `allowed_groups`;
   none checked = every group), choose the provider, and enable/disable the instance.
+- **sign in by QR** — if the account is signed out, the portal shows the gateway's
+  login QR and continues automatically once you scan it.
 
 Saving writes `channels.toml` — restart `channels start` to apply. The gateway
 token stays server-side and never reaches the browser. Flags: `--port` (default

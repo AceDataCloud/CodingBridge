@@ -87,6 +87,20 @@ def _mock_transport():
             return httpx.Response(200, json={"total": 2, "contacts": []})
         if p == "/api/auth/status":
             return httpx.Response(200, json={"logged_in": True})
+        if p == "/api/auth/qr":
+            return httpx.Response(
+                202,
+                json={
+                    "id": "t1",
+                    "kind": "auth.qr",
+                    "status": "completed",
+                    "result": {"base64": "QRDATA"},
+                },
+            )
+        if p.startswith("/api/tasks/"):
+            return httpx.Response(
+                200, json={"id": "t1", "status": "completed", "result": {"base64": "QRDATA"}}
+            )
         return httpx.Response(404, json={"error": "nope"})
 
     return httpx.MockTransport(handler), calls
@@ -251,6 +265,53 @@ def test_account_and_groups(tmp_path, monkeypatch):
     assert svc.account("beijing")["nickname"] == "Ace"
     groups = svc.groups("beijing")
     assert [g["name"] for g in groups] == ["Team"]  # private conv excluded
+    svc.close()
+
+
+def test_qr_returns_base64_inline_result(tmp_path, monkeypatch):
+    svc, _ = _service(tmp_path, monkeypatch)
+    assert svc.qr("beijing")["base64"] == "QRDATA"
+    svc.close()
+
+
+def test_qr_polls_until_result(tmp_path, monkeypatch):
+    monkeypatch.setenv("WT", "gw-secret")
+    s = _settings(tmp_path)
+    (tmp_path / "channels.toml").write_text(
+        dump_channels_toml(ChannelsConfig(wechat=(_inst(),))), encoding="utf-8"
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        p = request.url.path
+        if p == "/api/auth/qr":
+            return httpx.Response(202, json={"id": "t2", "status": "queued", "result": None})
+        if p == "/api/tasks/t2":
+            return httpx.Response(
+                200, json={"id": "t2", "status": "completed", "result": {"base64": "POLLED"}}
+            )
+        return httpx.Response(404, json={})
+
+    svc = PortalService(s, client=httpx.Client(transport=httpx.MockTransport(handler)))
+    assert svc.qr("beijing")["base64"] == "POLLED"
+    svc.close()
+
+
+def test_qr_already_logged_in_is_409(tmp_path, monkeypatch):
+    monkeypatch.setenv("WT", "gw-secret")
+    s = _settings(tmp_path)
+    (tmp_path / "channels.toml").write_text(
+        dump_channels_toml(ChannelsConfig(wechat=(_inst(),))), encoding="utf-8"
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/auth/qr":
+            return httpx.Response(409, json={"error": "already logged in"})
+        return httpx.Response(404, json={})
+
+    svc = PortalService(s, client=httpx.Client(transport=httpx.MockTransport(handler)))
+    with pytest.raises(PortalError) as ei:
+        svc.qr("beijing")
+    assert ei.value.status == 409
     svc.close()
 
 

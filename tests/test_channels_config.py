@@ -444,6 +444,50 @@ token_env = "T"
                 }
             )
 
+
+class TestRequireApproval:
+    def test_parses_true(self, tmp_path: Path) -> None:
+        p = _write(
+            tmp_path,
+            """
+[[channels.wechat]]
+instance_id = "x"
+base_url = "http://a"
+token_env = "T"
+require_approval = true
+""",
+        )
+        assert load_channels_config(p).wechat[0].require_approval is True
+
+    def test_default_false(self, tmp_path: Path) -> None:
+        p = _write(
+            tmp_path,
+            """
+[[channels.wechat]]
+instance_id = "x"
+base_url = "http://a"
+token_env = "T"
+""",
+        )
+        assert load_channels_config(p).wechat[0].require_approval is False
+
+    def test_non_bool_rejected(self) -> None:
+        with pytest.raises(ConfigError, match=r"require_approval must be a bool"):
+            parse_channels_config(
+                {
+                    "channels": {
+                        "wechat": [
+                            {
+                                "instance_id": "x",
+                                "base_url": "http://a",
+                                "token_env": "T",
+                                "require_approval": 1,
+                            }
+                        ]
+                    }
+                }
+            )
+
     def test_empty_file_raises(self, tmp_path: Path) -> None:
         f = tmp_path / "tok"
         f.write_text("   \n\n", encoding="utf-8")

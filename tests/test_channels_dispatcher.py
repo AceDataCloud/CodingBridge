@@ -13,6 +13,7 @@ from coding_bridge.channels import (
     SendResult,
     SessionDispatcher,
 )
+from coding_bridge.channels.approvals import ApprovalStore
 from coding_bridge.channels.dispatcher import BusyError
 from coding_bridge.config import Settings
 from coding_bridge.protocol import Event, event_payload
@@ -239,4 +240,117 @@ async def test_provider_error_takes_precedence_over_result_text(tmp_path):
     await _wait_until(lambda: bool(adapter.replies))
 
     assert adapter.replies == [("wxid_a", "(provider error: boom)")]
+    await dispatcher.aclose()
+
+
+# --------------------------------------------------------------------------- #
+# Live tool approvals (opt-in require_approval)
+# --------------------------------------------------------------------------- #
+
+
+class _ApprovalProvider:
+    """Asks for one tool permission, then reports the verdict as its reply."""
+
+    name = "stub"
+
+    def __init__(self, session_id, emit, ask):
+        self._session_id = session_id
+        self._emit = emit
+        self._ask = ask
+
+    async def start(self, _prompt, **_kw):
+        resolution = await self._ask(
+            "Bash", {"command": "git status"}, {"title": "Run git status"}
+        )
+        await self._emit(
+            event_payload(
+                Event.SESSION_RESULT, self._session_id, text=f"decision={resolution.decision}"
+            )
+        )
+
+    async def send(self, *_a, **_kw):
+        return
+
+    async def edit(self, *_a, **_kw):
+        return
+
+    async def interrupt(self):
+        return
+
+    async def aclose(self):
+        return
+
+
+def _approval_factory():
+    def _make(_name, session_id, emit, ask):
+        return _ApprovalProvider(session_id, emit, ask)
+
+    return _make
+
+
+@pytest.mark.asyncio
+async def test_require_approval_publishes_and_resolves_on_allow(tmp_path):
+    settings = Settings(config_dir=tmp_path)
+    store = ApprovalStore(tmp_path / "approvals", ttl=60.0)
+    dispatcher = SessionDispatcher(
+        settings,
+        provider_factory=_approval_factory(),
+        default_provider="stub",
+        turn_timeout=8.0,
+        approval_store=store,
+        require_approval=True,
+    )
+    adapter = _RecordingAdapter()
+    await dispatcher.handle_message(_msg(text="/ask do it"), adapter)
+
+    await _wait_until(lambda: len(store.list_pending()) == 1)
+    pending = store.list_pending()[0]
+    assert pending["tool"] == "Bash"
+    assert "git status" in pending["input_preview"]
+
+    assert store.decide(pending["id"], "allow")
+    await _wait_until(lambda: bool(adapter.replies))
+    assert adapter.replies[-1][1] == "decision=allow"
+    await dispatcher.aclose()
+
+
+@pytest.mark.asyncio
+async def test_require_approval_denies_on_portal_deny(tmp_path):
+    settings = Settings(config_dir=tmp_path)
+    store = ApprovalStore(tmp_path / "approvals", ttl=60.0)
+    dispatcher = SessionDispatcher(
+        settings,
+        provider_factory=_approval_factory(),
+        default_provider="stub",
+        turn_timeout=8.0,
+        approval_store=store,
+        require_approval=True,
+    )
+    adapter = _RecordingAdapter()
+    await dispatcher.handle_message(_msg(text="/ask do it"), adapter)
+    await _wait_until(lambda: len(store.list_pending()) == 1)
+    store.decide(store.list_pending()[0]["id"], "deny")
+    await _wait_until(lambda: bool(adapter.replies))
+    assert adapter.replies[-1][1] == "decision=deny"
+    await dispatcher.aclose()
+
+
+@pytest.mark.asyncio
+async def test_no_store_use_when_require_approval_disabled(tmp_path):
+    settings = Settings(config_dir=tmp_path)
+    settings.permission_timeout = 0.4  # broker denies quickly with no approver
+    store = ApprovalStore(tmp_path / "approvals", ttl=60.0)
+    dispatcher = SessionDispatcher(
+        settings,
+        provider_factory=_approval_factory(),
+        default_provider="stub",
+        turn_timeout=8.0,
+        approval_store=store,
+        require_approval=False,
+    )
+    adapter = _RecordingAdapter()
+    await dispatcher.handle_message(_msg(text="/ask do it"), adapter)
+    await _wait_until(lambda: bool(adapter.replies))
+    assert store.list_pending() == []
+    assert adapter.replies[-1][1] == "decision=deny"
     await dispatcher.aclose()

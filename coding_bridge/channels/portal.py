@@ -39,6 +39,7 @@ from urllib.parse import parse_qs, urlparse
 
 import httpx
 
+from .approvals import ApprovalStore
 from .config import (
     ChannelsConfig,
     ConfigError,
@@ -199,6 +200,8 @@ class PortalService:
         # Per-instance single-flight lock so overlapping searches (and the
         # background warm) share ONE fetch instead of each paging 4k+ rows.
         self._fetch_locks: dict[str, threading.Lock] = {}
+        # Cross-process tool-approval registry (shared with `channels start`).
+        self._approvals = ApprovalStore(settings.config_dir / "approvals")
 
     def close(self) -> None:
         if self._owns_client:
@@ -256,6 +259,14 @@ class PortalService:
             if inst.instance_id == instance_id:
                 return inst
         raise PortalError(404, f"no such instance {instance_id!r}")
+
+    # ---- tool approvals ------------------------------------------------- #
+
+    def list_approvals(self) -> list[dict[str, Any]]:
+        return self._approvals.list_pending()
+
+    def decide_approval(self, request_id: str, decision: str) -> bool:
+        return self._approvals.decide(request_id, decision)
 
     # ---- WeChat gateway proxy ------------------------------------------- #
 
@@ -560,7 +571,8 @@ def _make_handler(service: PortalService, token: str, port: int) -> type[BaseHTT
             if not self._token_ok(query):
                 self._send_json(401, {"error": "bad or missing portal token"})
                 return
-            if parsed.path != "/api/config":
+            post_path = parsed.path
+            if post_path not in ("/api/config", "/api/approvals"):
                 self._send_json(404, {"error": "not found"})
                 return
             try:
@@ -576,6 +588,15 @@ def _make_handler(service: PortalService, token: str, port: int) -> type[BaseHTT
                 payload = json.loads(raw)
             except ValueError:
                 self._send_json(400, {"error": "invalid JSON"})
+                return
+            if post_path == "/api/approvals":
+                rid = (payload or {}).get("id")
+                decision = (payload or {}).get("decision")
+                if not isinstance(rid, str) or decision not in ("allow", "deny"):
+                    self._send_json(400, {"error": "id and decision (allow|deny) required"})
+                    return
+                ok = service.decide_approval(rid, decision)
+                self._send_json(200 if ok else 404, {"ok": ok})
                 return
             try:
                 result = service.save((payload or {}).get("instances", []))
@@ -593,6 +614,8 @@ def _make_handler(service: PortalService, token: str, port: int) -> type[BaseHTT
             try:
                 if path == "/api/config":
                     self._send_json(200, service.public_config())
+                elif path == "/api/approvals":
+                    self._send_json(200, {"approvals": service.list_approvals()})
                 elif path == "/api/wechat/account":
                     self._send_json(200, service.account(instance))
                 elif path == "/api/wechat/status":

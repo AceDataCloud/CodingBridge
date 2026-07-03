@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import logging
 import time
 import uuid
@@ -31,6 +32,7 @@ from ..config import Settings
 from ..protocol import Event
 from ..providers.base import ProviderFactory
 from ..session import Session
+from .approvals import ApprovalStore
 from .base import ChannelAdapter, ChannelTarget, IncomingMessage, SendResult
 from .observability import TurnEvent, TurnOutcome, log_turn
 
@@ -104,12 +106,18 @@ class SessionDispatcher:
         reply_sink: ReplySink | None = None,
         turn_timeout: float = 300.0,
         default_provider: str = "claude",
+        approval_store: ApprovalStore | None = None,
+        require_approval: bool = False,
     ) -> None:
         self.settings = settings
         self._factory = provider_factory
         self._reply_sink = reply_sink or _default_reply_sink
         self._turn_timeout = turn_timeout
         self._default_provider = default_provider
+        # Live tool-approval relay (opt-in). When ``require_approval`` is off (the
+        # default) NONE of the approval code runs, so the daemon path is unchanged.
+        self._approval_store = approval_store
+        self._require_approval = bool(require_approval and approval_store is not None)
         self._inflight: dict[SessionKey, asyncio.Task[Any]] = {}
         self._lock = asyncio.Lock()
 
@@ -146,9 +154,17 @@ class SessionDispatcher:
     ) -> None:
         session_id = uuid.uuid4().hex
         turn = _Turn()
+        session_ref: dict[str, Session] = {}
+        approval_tasks: list[asyncio.Task[Any]] = []
 
         async def emit(payload: dict[str, Any]) -> None:
             turn.on_event(payload)
+            # Relay tool-permission prompts to the portal when the instance opted
+            # in; otherwise this branch never runs and behaviour is unchanged.
+            if self._require_approval and payload.get("event") == Event.PERMISSION_REQUEST:
+                approval_tasks.append(
+                    asyncio.create_task(self._await_approval(session_ref, adapter, payload))
+                )
 
         session = Session(
             session_id=session_id,
@@ -160,6 +176,7 @@ class SessionDispatcher:
             permission_mode="default",
             provider=self._default_provider,
         )
+        session_ref["s"] = session
         started = time.monotonic()
         outcome: TurnOutcome = "ok"
         reply = ""
@@ -213,6 +230,14 @@ class SessionDispatcher:
                 with contextlib.suppress(Exception):
                     await self._reply_sink(adapter, msg.target, f"(provider error: {exc})")
         finally:
+            # Stop any pending approval pollers first — as they unwind they
+            # resolve the request (deny) and clean up their store entries.
+            for t in approval_tasks:
+                if not t.done():
+                    t.cancel()
+            for t in approval_tasks:
+                with contextlib.suppress(BaseException):
+                    await t
             # One structured, content-free event per turn (see observability.py).
             with contextlib.suppress(Exception):
                 log_turn(
@@ -233,6 +258,61 @@ class SessionDispatcher:
                 async with self._lock:
                     if self._inflight.get(key) is asyncio.current_task():
                         self._inflight.pop(key, None)
+
+    async def _await_approval(
+        self,
+        session_ref: dict[str, Session],
+        adapter: ChannelAdapter,
+        payload: dict[str, Any],
+    ) -> None:
+        """Publish a pending tool approval, wait for a portal decision, resolve it.
+
+        Bounded by ``turn_timeout`` — if no one decides in time the request is
+        denied (the provider's own permission timeout would deny anyway).
+        Cancelled when the turn ends; on any exit the request is resolved (deny
+        by default) and its store files are removed.
+        """
+        store = self._approval_store
+        request_id = payload.get("request_id")
+        if store is None or not isinstance(request_id, str) or not store.valid_id(request_id):
+            return
+        descriptor = {
+            "instance_id": adapter.instance_id,
+            "adapter": adapter.name,
+            "tool": str(payload.get("tool") or "tool"),
+            **_approval_summary(payload),
+        }
+        with contextlib.suppress(Exception):
+            store.create(request_id, descriptor)
+        decision: str | None = None
+        deadline = time.monotonic() + self._turn_timeout
+        try:
+            while time.monotonic() < deadline:
+                await asyncio.sleep(1.0)
+                decision = store.poll_decision(request_id)
+                if decision:
+                    break
+        finally:
+            session = session_ref.get("s")
+            if session is not None:
+                with contextlib.suppress(Exception):
+                    session.resolve_permission(request_id, decision or "deny")
+            with contextlib.suppress(Exception):
+                store.cleanup(request_id)
+
+
+def _approval_summary(payload: dict[str, Any]) -> dict[str, Any]:
+    """A bounded, display-only view of a permission request for the portal."""
+    title = payload.get("title") or payload.get("description")
+    raw = payload.get("input")
+    try:
+        preview = json.dumps(raw, ensure_ascii=False) if raw is not None else ""
+    except (TypeError, ValueError):
+        preview = str(raw)
+    return {
+        "title": (str(title)[:160] if title else None),
+        "input_preview": preview[:400],
+    }
 
 
 async def _default_reply_sink(

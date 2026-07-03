@@ -225,7 +225,6 @@ def cmd_channels_start(settings: Settings) -> int:
     """
     from .channels.dispatcher import SessionDispatcher  # local import: heavy deps
     from .providers import default_provider_factory
-
     path = settings.channels_config_path
     try:
         cfg = load_channels_config(path)
@@ -256,16 +255,22 @@ def cmd_channels_start(settings: Settings) -> int:
     provider_factory = default_provider_factory(settings)
 
     async def _go() -> None:
+        from .channels.approvals import ApprovalStore
+
         adapters: list[ChannelAdapter] = []
         dispatchers: list[SessionDispatcher] = []
         runners: list[asyncio.Task[None]] = []
         stop = asyncio.Event()
+        # Shared across instances; only used by instances with require_approval.
+        approval_store = ApprovalStore(settings.config_dir / "approvals")
 
         for inst, token in resolved:
             dispatcher = SessionDispatcher(
                 settings,
                 provider_factory,
                 default_provider=inst.default_provider or "claude",
+                approval_store=approval_store,
+                require_approval=inst.require_approval,
             )
             gate = PolicyGate(inst.to_policy(), dispatcher.handle_message)
             adapter = WeChatAdapter(

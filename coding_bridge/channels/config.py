@@ -60,6 +60,7 @@ _WECHAT_KEYS = frozenset(
         "token_file",
         "enabled",
         "default_provider",
+        "require_approval",
         "trigger_prefix",
         "allowed_senders",
         "allowed_groups",
@@ -91,6 +92,9 @@ class WeChatInstanceConfig:
     token_env: str | None = None
     token_file: str | None = None
     enabled: bool = False
+    #: When true, a tool the agent wants to run in this instance's turns is held
+    #: for approval via ``channels portal`` instead of running unattended.
+    require_approval: bool = False
     default_provider: str | None = None
     #: Message text must start with this to be forwarded. Empty string disables
     #: the check. See ``coding_bridge.channels.policy.ChannelPolicy``.
@@ -240,6 +244,11 @@ def _parse_wechat(block: dict[str, Any], index: int) -> WeChatInstanceConfig:
     # (`enabled = 1` in TOML → int → we want a hard error, not a silent truthy).
     if not isinstance(enabled, bool):
         raise ConfigError(f"[[channels.wechat]] {instance_id!r}: enabled must be a bool")
+    require_approval = block.get("require_approval", False)
+    if not isinstance(require_approval, bool):
+        raise ConfigError(
+            f"[[channels.wechat]] {instance_id!r}: require_approval must be a bool"
+        )
     default_provider = block.get("default_provider")
     if default_provider is not None:
         if not isinstance(default_provider, str):
@@ -318,6 +327,7 @@ def _parse_wechat(block: dict[str, Any], index: int) -> WeChatInstanceConfig:
         token_env=token_env,
         token_file=token_file,
         enabled=enabled,
+        require_approval=require_approval,
         default_provider=default_provider,
         trigger_prefix=trigger_prefix,
         allowed_senders=tuple(allowed_senders_raw),

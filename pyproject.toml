@@ -32,6 +32,7 @@ qr = ["qrcode>=7.4"]
 # these expose intent (`pip install coding-bridge[wechat]`) without pulling
 # additional wheels.
 wechat = []
+telegram = []
 dev = [
     "pytest>=8",
     "pytest-asyncio>=0.23",

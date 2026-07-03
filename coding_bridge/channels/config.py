@@ -19,6 +19,13 @@ Schema (fail-fast; unknown keys raise):
     enabled = false                      # default false — explicit opt-in
     default_provider = "claude"          # optional override for this instance
 
+    [[channels.telegram]]
+    instance_id = "my-bot"               # required, unique per file
+    token_env = "TELEGRAM_TOKEN_MY_BOT"  # required unless token_file is set
+    api_base = "https://api.telegram.org"  # optional; override for self-hosted
+    enabled = false                      # default false — explicit opt-in
+    default_provider = "claude"          # optional override for this instance
+
 Design notes:
 
 * The **token itself never lives in the TOML file** — the file references an
@@ -68,7 +75,24 @@ _WECHAT_KEYS = frozenset(
         "dedup_window_seconds",
     }
 )
-_CHANNELS_KEYS = frozenset({"wechat"})
+_CHANNELS_KEYS = frozenset({"wechat", "telegram"})
+
+_TELEGRAM_KEYS = frozenset(
+    {
+        "instance_id",
+        "api_base",
+        "token_env",
+        "token_file",
+        "enabled",
+        "default_provider",
+        "require_approval",
+        "trigger_prefix",
+        "allowed_senders",
+        "allowed_groups",
+        "rate_limit_per_min",
+        "dedup_window_seconds",
+    }
+)
 
 # Cap the TOML file size so a misconfigured `channels.toml` pointing at
 # `/dev/urandom` or similar can't OOM the daemon at startup.
@@ -81,6 +105,69 @@ _MAX_TOKEN_BYTES = 64 * 1024
 
 class ConfigError(ValueError):
     """Raised for any schema violation — never caught silently."""
+
+
+def _resolve_token_source(
+    kind: str,
+    instance_id: str,
+    token_env: str | None,
+    token_file: str | None,
+    environ: dict[str, str] | None = None,
+) -> str:
+    """Load a token from an env var or a secrets file. Never logs the value.
+
+    Shared by every channel type so ``token_env`` / ``token_file`` behave (and
+    fail) identically. Error messages reference the env-var *name* or file
+    *path* only — never the token.
+    """
+    env = environ if environ is not None else dict(os.environ)
+    if token_env:
+        token = env.get(token_env)
+        if not token:
+            raise ConfigError(
+                f"{kind} instance {instance_id!r}: env var "
+                f"{token_env!r} is unset or empty"
+            )
+        return token
+    if token_file:
+        path = Path(token_file).expanduser()
+        try:
+            # Reject anything that isn't a regular file up front so a symlink to
+            # a directory / device raises a clean ConfigError, not a raw OSError.
+            if not path.is_file():
+                raise ConfigError(
+                    f"{kind} instance {instance_id!r}: token_file "
+                    f"{str(path)!r} is not a regular file"
+                )
+            size = path.stat().st_size
+            if size > _MAX_TOKEN_BYTES:
+                raise ConfigError(
+                    f"{kind} instance {instance_id!r}: token_file "
+                    f"{str(path)!r} exceeds {_MAX_TOKEN_BYTES}-byte limit"
+                )
+            raw = path.read_bytes()
+        except OSError as exc:
+            raise ConfigError(
+                f"{kind} instance {instance_id!r}: cannot read "
+                f"token_file {str(path)!r}: {exc.__class__.__name__}"
+            ) from None
+        try:
+            token = raw.decode("utf-8").strip()
+        except UnicodeDecodeError:
+            raise ConfigError(
+                f"{kind} instance {instance_id!r}: token_file "
+                f"{str(path)!r} is not valid UTF-8"
+            ) from None
+        if not token:
+            raise ConfigError(
+                f"{kind} instance {instance_id!r}: token_file "
+                f"{str(path)!r} is empty"
+            )
+        return token
+    raise ConfigError(
+        f"{kind} instance {instance_id!r}: either token_env or "
+        "token_file must be set"
+    )
 
 
 @dataclass(frozen=True)
@@ -129,60 +216,49 @@ class WeChatInstanceConfig:
         )
 
     def resolve_token(self, environ: dict[str, str] | None = None) -> str:
-        """Load the token from env var or secrets file. Never logs it.
+        """Load the token from env var or secrets file. Never logs it."""
+        return _resolve_token_source(
+            "wechat", self.instance_id, self.token_env, self.token_file, environ
+        )
 
-        Raises ``ConfigError`` with a **redacted** message if the token can't
-        be resolved — the message references the env-var *name* or file path,
-        never the value.
-        """
-        env = environ if environ is not None else dict(os.environ)
-        if self.token_env:
-            token = env.get(self.token_env)
-            if not token:
-                raise ConfigError(
-                    f"wechat instance {self.instance_id!r}: env var "
-                    f"{self.token_env!r} is unset or empty"
-                )
-            return token
-        if self.token_file:
-            path = Path(self.token_file).expanduser()
-            try:
-                # Reject anything that isn't a regular file up front so a
-                # symlink pointing at a directory / device raises a clean
-                # ConfigError instead of a raw OSError / UnicodeDecodeError.
-                if not path.is_file():
-                    raise ConfigError(
-                        f"wechat instance {self.instance_id!r}: token_file "
-                        f"{str(path)!r} is not a regular file"
-                    )
-                size = path.stat().st_size
-                if size > _MAX_TOKEN_BYTES:
-                    raise ConfigError(
-                        f"wechat instance {self.instance_id!r}: token_file "
-                        f"{str(path)!r} exceeds {_MAX_TOKEN_BYTES}-byte limit"
-                    )
-                raw = path.read_bytes()
-            except OSError as exc:
-                raise ConfigError(
-                    f"wechat instance {self.instance_id!r}: cannot read "
-                    f"token_file {str(path)!r}: {exc.__class__.__name__}"
-                ) from None
-            try:
-                token = raw.decode("utf-8").strip()
-            except UnicodeDecodeError:
-                raise ConfigError(
-                    f"wechat instance {self.instance_id!r}: token_file "
-                    f"{str(path)!r} is not valid UTF-8"
-                ) from None
-            if not token:
-                raise ConfigError(
-                    f"wechat instance {self.instance_id!r}: token_file "
-                    f"{str(path)!r} is empty"
-                )
-            return token
-        raise ConfigError(
-            f"wechat instance {self.instance_id!r}: either token_env or "
-            "token_file must be set"
+
+@dataclass(frozen=True)
+class TelegramInstanceConfig:
+    """One `[[channels.telegram]]` block (a Telegram bot, long-polling)."""
+
+    instance_id: str
+    token_env: str | None = None
+    token_file: str | None = None
+    #: Bot API host. Default is Telegram's; override for a self-hosted server.
+    api_base: str = "https://api.telegram.org"
+    enabled: bool = False
+    require_approval: bool = False
+    default_provider: str | None = None
+    trigger_prefix: str = "/ask "
+    #: Sender allowlist (Telegram numeric user ids as strings). Empty = allow all.
+    allowed_senders: tuple[str, ...] = ()
+    #: Group/supergroup chat ids (as strings, usually negative) the bot may
+    #: answer in. Empty = every group; never filters private DMs.
+    allowed_groups: tuple[str, ...] = ()
+    rate_limit_per_min: int = 6
+    dedup_window_seconds: float = 300.0
+
+    def to_policy(self) -> ChannelPolicy:
+        """Build the runtime ``ChannelPolicy`` this instance describes."""
+        from .policy import ChannelPolicy
+
+        return ChannelPolicy(
+            trigger_prefix=self.trigger_prefix,
+            allowed_senders=self.allowed_senders,
+            allowed_groups=self.allowed_groups,
+            rate_limit_per_min=self.rate_limit_per_min,
+            dedup_window_seconds=self.dedup_window_seconds,
+        )
+
+    def resolve_token(self, environ: dict[str, str] | None = None) -> str:
+        """Load the bot token from env var or secrets file. Never logs it."""
+        return _resolve_token_source(
+            "telegram", self.instance_id, self.token_env, self.token_file, environ
         )
 
 
@@ -191,10 +267,15 @@ class ChannelsConfig:
     """Root of the channels config file."""
 
     wechat: tuple[WeChatInstanceConfig, ...] = field(default_factory=tuple)
+    telegram: tuple[TelegramInstanceConfig, ...] = field(default_factory=tuple)
 
     @property
     def enabled_wechat(self) -> tuple[WeChatInstanceConfig, ...]:
         return tuple(inst for inst in self.wechat if inst.enabled)
+
+    @property
+    def enabled_telegram(self) -> tuple[TelegramInstanceConfig, ...]:
+        return tuple(inst for inst in self.telegram if inst.enabled)
 
 
 def _require(kind: str, block: dict[str, Any], key: str) -> Any:
@@ -337,6 +418,95 @@ def _parse_wechat(block: dict[str, Any], index: int) -> WeChatInstanceConfig:
     )
 
 
+def _parse_telegram(block: dict[str, Any], index: int) -> TelegramInstanceConfig:
+    kind = f"[[channels.telegram]] #{index}"
+    unknown = set(block.keys()) - _TELEGRAM_KEYS
+    if unknown:
+        raise ConfigError(f"{kind}: unknown key(s) {sorted(unknown)!r}")
+    instance_id = _require(kind, block, "instance_id")
+    if not isinstance(instance_id, str):
+        raise ConfigError(f"{kind}: instance_id must be a string")
+    tag = f"[[channels.telegram]] {instance_id!r}"
+
+    api_base = block.get("api_base", "https://api.telegram.org")
+    if not isinstance(api_base, str) or not (
+        api_base.startswith("http://") or api_base.startswith("https://")
+    ):
+        raise ConfigError(f"{tag}: api_base must start with http:// or https://")
+    if "@" in urlparse(api_base).netloc:
+        raise ConfigError(f"{tag}: api_base must not contain embedded credentials")
+
+    token_env = block.get("token_env")
+    token_file = block.get("token_file")
+    if token_env is not None and not isinstance(token_env, str):
+        raise ConfigError(f"{tag}: token_env must be a string")
+    if token_file is not None and not isinstance(token_file, str):
+        raise ConfigError(f"{tag}: token_file must be a string")
+    if token_env and token_file:
+        raise ConfigError(f"{tag}: set token_env OR token_file, not both")
+
+    enabled = block.get("enabled", False)
+    if not isinstance(enabled, bool):
+        raise ConfigError(f"{tag}: enabled must be a bool")
+    require_approval = block.get("require_approval", False)
+    if not isinstance(require_approval, bool):
+        raise ConfigError(f"{tag}: require_approval must be a bool")
+
+    default_provider = block.get("default_provider")
+    if default_provider is not None:
+        if not isinstance(default_provider, str):
+            raise ConfigError(f"{tag}: default_provider must be a string")
+        from ..providers import KNOWN_PROVIDERS
+
+        if default_provider not in KNOWN_PROVIDERS:
+            allowed = ", ".join(KNOWN_PROVIDERS)
+            raise ConfigError(
+                f"{tag}: unknown default_provider {default_provider!r} (allowed: {allowed})"
+            )
+
+    trigger_prefix = block.get("trigger_prefix", "/ask ")
+    if not isinstance(trigger_prefix, str):
+        raise ConfigError(f"{tag}: trigger_prefix must be a string")
+
+    allowed_senders_raw = block.get("allowed_senders", [])
+    if not isinstance(allowed_senders_raw, list) or not all(
+        isinstance(x, str) and x for x in allowed_senders_raw
+    ):
+        raise ConfigError(f"{tag}: allowed_senders must be a list of non-empty strings")
+    allowed_groups_raw = block.get("allowed_groups", [])
+    if not isinstance(allowed_groups_raw, list) or not all(
+        isinstance(x, str) and x for x in allowed_groups_raw
+    ):
+        raise ConfigError(f"{tag}: allowed_groups must be a list of non-empty strings")
+
+    rate_limit = block.get("rate_limit_per_min", 6)
+    if isinstance(rate_limit, bool) or not isinstance(rate_limit, int) or rate_limit < 0:
+        raise ConfigError(f"{tag}: rate_limit_per_min must be a non-negative int")
+
+    dedup_window = block.get("dedup_window_seconds", 300.0)
+    if isinstance(dedup_window, bool) or not isinstance(dedup_window, (int, float)):
+        raise ConfigError(f"{tag}: dedup_window_seconds must be a number")
+    if math.isnan(dedup_window) or math.isinf(dedup_window):
+        raise ConfigError(f"{tag}: dedup_window_seconds must be finite")
+    if dedup_window < 0:
+        raise ConfigError(f"{tag}: dedup_window_seconds must be >= 0")
+
+    return TelegramInstanceConfig(
+        instance_id=instance_id,
+        token_env=token_env,
+        token_file=token_file,
+        api_base=api_base.rstrip("/"),
+        enabled=enabled,
+        require_approval=require_approval,
+        default_provider=default_provider,
+        trigger_prefix=trigger_prefix,
+        allowed_senders=tuple(allowed_senders_raw),
+        allowed_groups=tuple(allowed_groups_raw),
+        rate_limit_per_min=rate_limit,
+        dedup_window_seconds=float(dedup_window),
+    )
+
+
 def parse_channels_config(data: dict[str, Any]) -> ChannelsConfig:
     """Parse an already-decoded TOML mapping. Public for test use."""
     channels = data.get("channels")
@@ -364,7 +534,24 @@ def parse_channels_config(data: dict[str, Any]) -> ChannelsConfig:
             )
         seen_ids.add(inst.instance_id)
         parsed.append(inst)
-    return ChannelsConfig(wechat=tuple(parsed))
+
+    tg_blocks = channels.get("telegram", [])
+    if not isinstance(tg_blocks, list):
+        raise ConfigError("[[channels.telegram]]: must be an array of tables")
+    tg_parsed: list[TelegramInstanceConfig] = []
+    tg_seen: set[str] = set()
+    for i, block in enumerate(tg_blocks):
+        if not isinstance(block, dict):
+            raise ConfigError(f"[[channels.telegram]] #{i}: must be a table")
+        tg = _parse_telegram(block, i)
+        if tg.instance_id in tg_seen:
+            raise ConfigError(
+                f"[[channels.telegram]]: duplicate instance_id {tg.instance_id!r}"
+            )
+        tg_seen.add(tg.instance_id)
+        tg_parsed.append(tg)
+
+    return ChannelsConfig(wechat=tuple(parsed), telegram=tuple(tg_parsed))
 
 
 def load_channels_config(path: Path) -> ChannelsConfig:

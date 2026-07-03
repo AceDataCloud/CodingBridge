@@ -25,14 +25,17 @@ from .config import (
     parse_channels_config,
 )
 from .dispatcher import SessionDispatcher
+from .policy import ChannelPolicy, PolicyGate
 
 __all__ = [
     "ChannelAdapter",
+    "ChannelPolicy",
     "ChannelTarget",
     "ChannelsConfig",
     "ConfigError",
     "IncomingMessage",
     "MessageHandler",
+    "PolicyGate",
     "SendResult",
     "SessionDispatcher",
     "WeChatInstanceConfig",

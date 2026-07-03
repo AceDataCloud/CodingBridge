@@ -7,8 +7,10 @@ so tests can inject a transport via :func:`respx`.
 
 from __future__ import annotations
 
+import re
 import time
 from typing import Any
+from urllib.parse import quote
 
 import httpx
 
@@ -18,6 +20,11 @@ from ..base import ChannelTarget, SendResult
 # is treated as a delivery failure — the adapter surfaces the payload verbatim
 # to the caller so operators have real diagnostics in the log.
 _ACCEPTED_STATUSES = frozenset({200, 201, 202})
+
+# Safe pattern for a gateway task id. The gateway generates UUID-like tokens; we
+# refuse anything with URL metacharacters so a caller can't inject a query
+# parameter or path segment into the GET.
+_TASK_ID_RE = re.compile(r"^[A-Za-z0-9_\-]{1,128}$")
 
 
 class WeChatClient:
@@ -104,3 +111,33 @@ class WeChatClient:
             error=f"HTTP {resp.status_code}: {(err or '')[:200]}",
             latency_ms=latency_ms,
         )
+
+    async def get_task_status(self, task_id: str) -> dict[str, Any]:
+        """Fetch delivery status for a task returned by ``send_message``.
+
+        Returns the parsed JSON body as-is (the gateway's shape may evolve). Raises
+        ``httpx.HTTPStatusError`` on non-2xx so the caller can distinguish
+        "not delivered yet" (200 with status=queued) from "task unknown" (404).
+
+        Kept deliberately small: this is a debug / diagnostics primitive used
+        by the ``doctor`` CLI command (P4) and E2E validation, not by the
+        adapter's fast path.
+
+        Raises ``ValueError`` on an empty or unsafely-shaped ``task_id`` —
+        rather than URL-encode and pray, we refuse anything that could
+        contain path/query metacharacters (``?``, ``#``, ``/``, ``..``).
+        """
+        if not task_id:
+            raise ValueError("task_id must not be empty")
+        if not _TASK_ID_RE.fullmatch(task_id):
+            raise ValueError("task_id contains invalid characters")
+        # Belt-and-suspenders: `quote(safe="")` still produces a plain
+        # segment since the regex already rejects unsafe input.
+        path = f"/api/messages/tasks/{quote(task_id, safe='')}"
+        resp = await self._client.get(path)
+        resp.raise_for_status()
+        try:
+            body = resp.json()
+        except ValueError:
+            return {}
+        return body if isinstance(body, dict) else {}

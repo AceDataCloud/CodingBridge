@@ -227,3 +227,73 @@ async def test_e2e_duplicate_message_id_only_replies_once(tmp_path):
 
     assert adapter.replies == [("wxid_owner", "echo: once")]
     await dispatcher.aclose()
+
+
+@pytest.mark.parametrize("provider_name", ["claude", "codex", "copilot"])
+@pytest.mark.asyncio
+async def test_e2e_default_provider_selects_named_provider(tmp_path, provider_name):
+    """The dispatcher's default_provider must reach the factory verbatim.
+
+    Guards the codex/copilot routing: a channel configured with
+    ``default_provider = "codex"`` must actually spin up the codex provider,
+    not silently fall back to claude. We spy the provider name the factory
+    receives (the real ``default_provider_factory`` switches on exactly this
+    argument).
+    """
+    settings = Settings(config_dir=tmp_path)
+    seen: list[str] = []
+
+    def _spy_factory(name, session_id, emit, ask):
+        seen.append(name)
+        return _ScriptedProvider(
+            session_id,
+            emit,
+            ask,
+            script=[event_payload(Event.SESSION_RESULT, session_id, text="ok")],
+        )
+
+    dispatcher = SessionDispatcher(
+        settings, provider_factory=_spy_factory, default_provider=provider_name
+    )
+    adapter = _InMemoryAdapter()
+    gate = PolicyGate(
+        ChannelPolicy(trigger_prefix="", allowed_senders=()), dispatcher.handle_message
+    )
+    adapter.set_handler(gate.handle)
+
+    await adapter.deliver(_msg("hello"))
+    await _wait_until(lambda: bool(adapter.replies))
+
+    assert seen == [provider_name]
+    await dispatcher.aclose()
+
+
+def test_real_factory_routes_provider_names(tmp_path):
+    """Lock the real ``default_provider_factory`` routing table.
+
+    Complements the dispatcher-level spy test above: this asserts the actual
+    production factory maps each name to the right Provider class (and that an
+    unknown name falls back to Claude — which is exactly why config-level
+    validation rejects typos before they reach here).
+    """
+    from coding_bridge.providers import (
+        ClaudeProvider,
+        CodexProvider,
+        CopilotProvider,
+        default_provider_factory,
+    )
+
+    settings = Settings(config_dir=tmp_path)
+    factory = default_provider_factory(settings)
+
+    async def _noop_emit(_payload):  # pragma: no cover - never called here
+        return None
+
+    async def _noop_ask(*_a, **_kw):  # pragma: no cover - never called here
+        return None
+
+    assert isinstance(factory("codex", "s1", _noop_emit, _noop_ask), CodexProvider)
+    assert isinstance(factory("copilot", "s2", _noop_emit, _noop_ask), CopilotProvider)
+    assert isinstance(factory("claude", "s3", _noop_emit, _noop_ask), ClaudeProvider)
+    # Unknown name falls back to Claude (config validation stops typos upstream).
+    assert isinstance(factory("gpt4", "s4", _noop_emit, _noop_ask), ClaudeProvider)

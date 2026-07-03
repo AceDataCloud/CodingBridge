@@ -236,10 +236,24 @@ def _parse_wechat(block: dict[str, Any], index: int) -> WeChatInstanceConfig:
     if not isinstance(enabled, bool):
         raise ConfigError(f"[[channels.wechat]] {instance_id!r}: enabled must be a bool")
     default_provider = block.get("default_provider")
-    if default_provider is not None and not isinstance(default_provider, str):
-        raise ConfigError(
-            f"[[channels.wechat]] {instance_id!r}: default_provider must be a string"
-        )
+    if default_provider is not None:
+        if not isinstance(default_provider, str):
+            raise ConfigError(
+                f"[[channels.wechat]] {instance_id!r}: default_provider must be a string"
+            )
+        # Fail fast on a typo (e.g. "gpt4") instead of silently falling through
+        # to Claude at runtime. Single source of truth = providers.KNOWN_PROVIDERS,
+        # imported lazily to keep this config loader self-contained (it's also
+        # imported by the `channels init`/`doctor` paths, which have no need to
+        # touch the providers package).
+        from ..providers import KNOWN_PROVIDERS
+
+        if default_provider not in KNOWN_PROVIDERS:
+            allowed = ", ".join(KNOWN_PROVIDERS)
+            raise ConfigError(
+                f"[[channels.wechat]] {instance_id!r}: unknown default_provider "
+                f"{default_provider!r} (allowed: {allowed})"
+            )
 
     trigger_prefix = block.get("trigger_prefix", "/ask ")
     if not isinstance(trigger_prefix, str):

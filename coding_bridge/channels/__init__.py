@@ -25,6 +25,7 @@ from .config import (
     parse_channels_config,
 )
 from .dispatcher import SessionDispatcher
+from .observability import TurnEvent, TurnOutcome, log_turn
 from .policy import ChannelPolicy, PolicyGate
 
 __all__ = [
@@ -38,7 +39,10 @@ __all__ = [
     "PolicyGate",
     "SendResult",
     "SessionDispatcher",
+    "TurnEvent",
+    "TurnOutcome",
     "WeChatInstanceConfig",
     "load_channels_config",
+    "log_turn",
     "parse_channels_config",
 ]

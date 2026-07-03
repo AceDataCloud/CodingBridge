@@ -140,11 +140,27 @@ or a secrets-file path (`token_file`). Export it before starting:
 export WECHAT_TOKEN_MY_WECHAT="…"
 ```
 
+#### Provider sign-in
+
+Each message runs a real **Claude Code** (or Codex) turn **on your machine**, so
+that CLI has to be signed in first. Sign in the usual way, or route the provider
+through **AceDataCloud** with your `api.acedata.cloud` key:
+
+```bash
+# Claude Code → AceDataCloud
+export ANTHROPIC_BASE_URL="https://api.acedata.cloud"
+export ANTHROPIC_AUTH_TOKEN="…"       # your api.acedata.cloud API key
+```
+
+(Codex is analogous — sign it in, or point it at your OpenAI-compatible base URL
+and key.) `channels smoke` (below) confirms this end to end: it should print the
+model's reply, not `Not logged in`.
+
 ### Verify, then run
 
 ```bash
 coding-bridge channels doctor   # validate config + confirm the token is accepted
-coding-bridge channels smoke    # run ONE real provider turn locally (no WeChat, no network)
+coding-bridge channels smoke    # run ONE real provider turn locally (no WeChat gateway)
 coding-bridge channels start    # connect and serve until Ctrl-C
 ```
 
@@ -154,6 +170,9 @@ coding-bridge channels start    # connect and serve until Ctrl-C
 | `doctor` | Validate `channels.toml` and ping every enabled gateway endpoint   |
 | `smoke`  | Run one real provider turn locally to prove your provider works    |
 | `start`  | Connect to each enabled gateway and serve replies until Ctrl-C     |
+
+After that one-time setup, day-to-day use is a **single command** —
+`coding-bridge channels start` — and you steer everything from WeChat.
 
 `channels smoke` flags: `--provider {claude,codex,copilot}` (default `claude`),
 `--prompt` (default `"Reply with the single word: pong"`), `--timeout` seconds

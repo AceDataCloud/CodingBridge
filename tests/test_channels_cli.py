@@ -336,7 +336,7 @@ class TestChannelsSmoke:
         s = _settings(tmp_path)
         rc, out, err = _capture(
             lambda: channels_cli.cmd_channels_smoke(
-                s, provider="stub", prompt="say pong", timeout=5.0
+                s, provider="claude", prompt="say pong", timeout=5.0
             )
         )
         assert rc == 0
@@ -353,7 +353,7 @@ class TestChannelsSmoke:
         s = _settings(tmp_path)
         rc, out, err = _capture(
             lambda: channels_cli.cmd_channels_smoke(
-                s, provider="stub", prompt="x", timeout=5.0
+                s, provider="claude", prompt="x", timeout=5.0
             )
         )
         assert rc == 1
@@ -370,7 +370,7 @@ class TestChannelsSmoke:
         s = _settings(tmp_path)
         rc, out, err = _capture(
             lambda: channels_cli.cmd_channels_smoke(
-                s, provider="stub", prompt="x", timeout=5.0
+                s, provider="claude", prompt="x", timeout=5.0
             )
         )
         assert rc == 1
@@ -388,11 +388,24 @@ class TestChannelsSmoke:
         s = _settings(tmp_path)
         rc, out, err = _capture(
             lambda: channels_cli.cmd_channels_smoke(
-                s, provider="stub", prompt="x", timeout=0.2
+                s, provider="claude", prompt="x", timeout=0.2
             )
         )
         assert rc == 1
         assert "timed out" in out
+
+    def test_smoke_unknown_provider_exits_2(self, tmp_path: Path) -> None:
+        # Parity with the channels.toml default_provider validation: an unknown
+        # --provider must fail loudly (rc=2), not silently fall back to Claude.
+        s = _settings(tmp_path)
+        rc, out, err = _capture(
+            lambda: channels_cli.cmd_channels_smoke(
+                s, provider="gpt4", prompt="x", timeout=5.0
+            )
+        )
+        assert rc == 2
+        assert "unknown provider" in err
+        assert "gpt4" in err
 
 
 # ---------- argparse integration ---------------------------------------------
@@ -426,7 +439,7 @@ class TestArgparseIntegration:
                     str(tmp_path),
                     "smoke",
                     "--provider",
-                    "stub",
+                    "claude",
                     "--prompt",
                     "hi",
                     "--timeout",

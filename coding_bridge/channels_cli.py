@@ -325,7 +325,8 @@ def cmd_channels_smoke(
     provider binary + auth + dispatcher wiring are all good; the only remaining
     variable for ``channels start`` is the WeChat gateway token (covered by ``doctor``).
 
-    Exit codes: 0 = provider replied, 1 = provider error / empty / timeout.
+    Exit codes: 0 = provider replied, 1 = provider error / empty / timeout,
+    2 = unknown provider name.
     """
     from .channels.base import ChannelTarget, IncomingMessage, SendResult
     from .channels.dispatcher import SessionDispatcher
@@ -333,7 +334,15 @@ def cmd_channels_smoke(
     # Imported at call time (not module top) so tests can monkeypatch
     # `coding_bridge.providers.default_provider_factory` before we resolve it,
     # and so the heavy provider deps stay out of the CLI import path.
-    from .providers import default_provider_factory
+    from .providers import KNOWN_PROVIDERS, default_provider_factory
+
+    # Validate up front for parity with the channels.toml `default_provider`
+    # check — otherwise `--provider gpt4` would silently fall back to Claude and
+    # the operator would think they'd smoke-tested codex.
+    if provider not in KNOWN_PROVIDERS:
+        allowed = ", ".join(KNOWN_PROVIDERS)
+        print(f"unknown provider {provider!r} (allowed: {allowed})", file=sys.stderr)
+        return 2
 
     captured: dict[str, str] = {}
 

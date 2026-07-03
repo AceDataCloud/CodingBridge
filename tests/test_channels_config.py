@@ -224,6 +224,43 @@ class TestParseFailFast:
                 }
             )
 
+    def test_default_provider_must_be_known(self) -> None:
+        # A typo like "gpt4" must be rejected at load time, not silently
+        # fall through to Claude at runtime.
+        with pytest.raises(ConfigError, match=r"unknown default_provider 'gpt4'"):
+            parse_channels_config(
+                {
+                    "channels": {
+                        "wechat": [
+                            {
+                                "instance_id": "x",
+                                "base_url": "http://a",
+                                "token_env": "T",
+                                "default_provider": "gpt4",
+                            }
+                        ]
+                    }
+                }
+            )
+
+    @pytest.mark.parametrize("provider", ["claude", "codex", "copilot"])
+    def test_default_provider_accepts_known(self, provider: str) -> None:
+        cfg = parse_channels_config(
+            {
+                "channels": {
+                    "wechat": [
+                        {
+                            "instance_id": "x",
+                            "base_url": "http://a",
+                            "token_env": "T",
+                            "default_provider": provider,
+                        }
+                    ]
+                }
+            }
+        )
+        assert cfg.wechat[0].default_provider == provider
+
     def test_duplicate_instance_id_rejected(self) -> None:
         with pytest.raises(ConfigError, match=r"duplicate instance_id 'dup'"):
             parse_channels_config(

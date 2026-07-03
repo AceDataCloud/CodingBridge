@@ -375,6 +375,21 @@ class TestResolveToken:
         with pytest.raises(ConfigError, match=r"either token_env or token_file must be set"):
             inst.resolve_token({})
 
+    def test_repr_never_contains_resolved_token(self) -> None:
+        # The config object holds only the env-var NAME / file PATH, never the
+        # secret. `repr()` (used by logging %r, tracebacks, debuggers) must not
+        # be able to expose a token because the token isn't stored on it.
+        inst = WeChatInstanceConfig(
+            instance_id="x", base_url="http://a", token_env="MY_SECRET_ENV"
+        )
+        token = inst.resolve_token({"MY_SECRET_ENV": "super-secret-value-xyz"})
+        assert token == "super-secret-value-xyz"
+        # The resolved token is a local — the frozen config never captured it.
+        assert "super-secret-value-xyz" not in repr(inst)
+        assert "super-secret-value-xyz" not in str(inst)
+        # The env-var NAME is fine to appear (it's not the secret).
+        assert "MY_SECRET_ENV" in repr(inst)
+
 
 class TestSettingsIntegration:
     def test_channels_config_path_is_under_config_dir(self, tmp_path: Path) -> None:

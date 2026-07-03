@@ -244,6 +244,17 @@ def main(argv: list[str] | None = None) -> None:
         func=cmd_logout
     )
 
+    # `coding-bridge channels {init,start,doctor}` — wires WeChat
+    # adapters to the SessionDispatcher. See channels_cli.py.
+    from . import channels_cli
+
+    p_channels = sub.add_parser(
+        "channels",
+        help="Manage optional messaging-channel adapters (e.g. WeChat)",
+        parents=[common],
+    )
+    channels_cli.register_subparsers(p_channels, common)
+
     args = parser.parse_args(argv)
     settings = _build_settings(args)
     log_path = logs.setup(settings.log_level, settings.log_dir)

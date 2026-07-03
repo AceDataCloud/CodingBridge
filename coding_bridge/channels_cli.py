@@ -1,0 +1,368 @@
+"""CLI plumbing for the ``coding-bridge channels`` subcommand group.
+
+Sub-subcommands:
+
+* ``coding-bridge channels init`` — write a skeleton ``channels.toml`` next to
+  the credentials file (safe defaults: ``enabled=false``).
+* ``coding-bridge channels start`` — read ``channels.toml``, spin up one
+  ``PolicyGate → SessionDispatcher`` per enabled instance, and run the
+  adapter loop until Ctrl-C.
+* ``coding-bridge channels doctor`` — validate ``channels.toml``, resolve
+  each token (without ever printing it), and ping each WeChat gateway endpoint.
+
+The dispatcher-wiring lives ONLY here — the `coding_bridge.channels.*`
+package stays pure library code that can be reused by other CLIs or by tests.
+"""
+
+from __future__ import annotations
+
+import argparse
+import asyncio
+import contextlib
+import logging
+import stat
+import sys
+from pathlib import Path
+from typing import TYPE_CHECKING
+
+import httpx
+
+from .channels import ConfigError, PolicyGate, load_channels_config
+from .channels.wechat import WeChatAdapter, WeChatClient
+from .config import Settings
+
+if TYPE_CHECKING:
+    from .channels import ChannelAdapter, WeChatInstanceConfig
+    from .channels.dispatcher import SessionDispatcher
+
+logger = logging.getLogger("coding-bridge.channels.cli")
+
+
+# ---------- init --------------------------------------------------------------
+
+_INIT_TEMPLATE = """\
+# coding-bridge channels config
+# Every instance is `enabled = false` by default — flip to true only when the
+# token env var is set and the sender allowlist is filled in. See
+# https://github.com/AceDataCloud/CodingBridge for docs.
+
+# [[channels.wechat]]
+# instance_id = "my-wechat"
+# base_url = "http://127.0.0.1:8000"
+# token_env = "WECHAT_TOKEN_MY_WECHAT"
+# enabled = false
+#
+# # Only respond when a message starts with this prefix. Empty string disables
+# # the prefix check. Group chats basically require this.
+# trigger_prefix = "/ask "
+#
+# # Only accept messages from these sender IDs (WeChat wxid). Empty list means
+# # allow all — safe only when the token is exclusively yours.
+# allowed_senders = []
+#
+# # At most this many messages per sender_id per 60 s. 0 disables the limit.
+# rate_limit_per_min = 6
+#
+# # Drop repeat msg_id inside this window (upstream retries). 0 disables.
+# dedup_window_seconds = 300.0
+"""
+
+
+def _write_secure_file(path: Path, body: str) -> None:
+    """Atomically create ``path`` with ``body``. Fails if it already exists.
+
+    Uses ``open(..., 'x')`` (exclusive create) so a concurrent second
+    ``channels init`` can't race between our ``exists()`` check and our
+    ``write_text()``. On POSIX, chmod 0600 so token references aren't
+    world-readable. On Windows, the file inherits the parent's ACL — since
+    the file only ever contains env-var *names* and file *paths*, not the
+    tokens themselves, this is acceptable.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    # `x` = exclusive create; raises FileExistsError if the file exists.
+    with path.open("x", encoding="utf-8") as f:
+        f.write(body)
+    if hasattr(stat, "S_IMODE") and sys.platform != "win32":
+        with contextlib.suppress(OSError):
+            path.chmod(0o600)
+
+
+def cmd_channels_init(settings: Settings) -> int:
+    """Write a skeleton `channels.toml`. Refuses to overwrite an existing file."""
+    path = settings.channels_config_path
+    try:
+        _write_secure_file(path, _INIT_TEMPLATE)
+    except FileExistsError:
+        print(f"Refusing to overwrite existing config: {path}", file=sys.stderr)
+        print(
+            "Delete it or edit it in place. `coding-bridge channels init` is "
+            "one-shot on purpose so you never lose a working config.",
+            file=sys.stderr,
+        )
+        return 1
+    print(f"Wrote {path}")
+    print("Next steps:")
+    print("  1. Uncomment the [[channels.wechat]] block and fill in instance_id + base_url.")
+    print("  2. Export the token env var referenced by `token_env`.")
+    print("  3. Fill `allowed_senders` with your own WeChat wxid.")
+    print("  4. Flip `enabled = true`.")
+    print("  5. Run `coding-bridge channels doctor` to verify.")
+    print("  6. Run `coding-bridge channels start`.")
+    return 0
+
+
+# ---------- doctor ------------------------------------------------------------
+
+
+async def _doctor_one(inst: WeChatInstanceConfig) -> tuple[bool, str]:
+    """Return (ok, message) for one instance. Never raises; never logs secrets.
+
+    Actually tests that the token is accepted by hitting an authenticated
+    endpoint (``GET /api/messages/tasks/<probe>``). The gateway's response:
+
+    * 401 → token rejected → FAIL (loudly, since this is the whole point of doctor)
+    * 404 → token accepted but probe id unknown → PASS (this is expected)
+    * 2xx → token accepted, endpoint returned a status → PASS
+    * 5xx / other → server broken → FAIL
+    * network error → unreachable → FAIL
+
+    Falls back to ``/health`` if the tasks endpoint isn't implemented, but
+    warns that auth wasn't verified.
+    """
+    try:
+        token = inst.resolve_token()
+    except ConfigError as exc:
+        return False, f"token: {exc}"
+
+    token_len = len(token)  # only the length is safe to display
+    client = WeChatClient(inst.base_url, token, timeout=5.0)
+    try:
+        # Probe id is a syntactically valid but almost-certainly-unknown token.
+        # It uses only characters allowed by _TASK_ID_RE so `get_task_status`
+        # will actually issue the request.
+        probe = "coding-bridge-doctor-probe"
+        try:
+            await client.get_task_status(probe)
+            # 2xx means the probe id happened to exist (extremely unlikely) —
+            # still counts as auth OK.
+            return True, f"OK (token accepted, {token_len} bytes)"
+        except httpx.HTTPStatusError as http_exc:
+            code = http_exc.response.status_code
+            if code == 401:
+                return False, "token rejected (401)"
+            if code == 403:
+                return False, "token forbidden (403)"
+            if code == 404:
+                # Token was fine — server just didn't have that task. This is
+                # the happy path for a fresh install.
+                return True, f"OK (token accepted, {token_len} bytes)"
+            if 500 <= code < 600:
+                # Try /health as a last-ditch reachability check so we don't
+                # mis-report a 5xx on a gateway that doesn't implement the
+                # tasks endpoint at all.
+                try:
+                    resp = await client._client.get("/health")  # noqa: SLF001
+                    if 200 <= resp.status_code < 300:
+                        return False, (
+                            f"reachable at /health but /api/messages/tasks "
+                            f"returned {code} (gateway may be misconfigured)"
+                        )
+                except Exception:  # noqa: BLE001
+                    pass
+                return False, f"server error {code}"
+            return False, f"unexpected {code}"
+    except Exception as exc:  # noqa: BLE001 - diagnostic; class name only
+        return False, f"unreachable: {exc.__class__.__name__}"
+    finally:
+        await client.aclose()
+
+
+def cmd_channels_doctor(settings: Settings) -> int:
+    """Load config + check each instance's token + reachability."""
+    path = settings.channels_config_path
+    try:
+        cfg = load_channels_config(path)
+    except ConfigError as exc:
+        print(f"config error in {path}: {exc}", file=sys.stderr)
+        return 2
+
+    if not cfg.wechat:
+        print(f"No channels configured in {path}. Run `channels init` first.")
+        return 0
+
+    print(f"Config file: {path}")
+    print(f"Total instances: {len(cfg.wechat)} (enabled: {len(cfg.enabled_wechat)})")
+    print()
+
+    all_ok = True
+
+    async def _run() -> None:
+        nonlocal all_ok
+        for inst in cfg.wechat:
+            state = "ENABLED" if inst.enabled else "disabled"
+            print(f"[{state}] {inst.instance_id}: {inst.base_url}")
+            if not inst.enabled:
+                print("  → skipped (enabled=false)")
+                continue
+            ok, msg = await _doctor_one(inst)
+            marker = "✓" if ok else "✗"
+            print(f"  {marker} {msg}")
+            if not ok:
+                all_ok = False
+
+    asyncio.run(_run())
+    return 0 if all_ok else 1
+
+
+# ---------- start -------------------------------------------------------------
+
+
+def cmd_channels_start(settings: Settings) -> int:
+    """Load channels + spin up one adapter per enabled instance until Ctrl-C.
+
+    Blocks. Exits 0 on Ctrl-C, non-zero on config error or if no enabled
+    instances are configured.
+    """
+    from .channels.dispatcher import SessionDispatcher  # local import: heavy deps
+    from .providers import default_provider_factory
+
+    path = settings.channels_config_path
+    try:
+        cfg = load_channels_config(path)
+    except ConfigError as exc:
+        print(f"config error in {path}: {exc}", file=sys.stderr)
+        return 2
+
+    enabled = cfg.enabled_wechat
+    if not enabled:
+        print(
+            "No enabled channels — set `enabled = true` on at least one "
+            "[[channels.wechat]] block in " + str(path),
+            file=sys.stderr,
+        )
+        return 1
+
+    # Resolve tokens up front so a missing env var kills us before any
+    # network connection instead of silently.
+    resolved: list[tuple[WeChatInstanceConfig, str]] = []
+    for inst in enabled:
+        try:
+            token = inst.resolve_token()
+        except ConfigError as exc:
+            print(f"config error: {exc}", file=sys.stderr)
+            return 2
+        resolved.append((inst, token))
+
+    provider_factory = default_provider_factory(settings)
+
+    async def _go() -> None:
+        adapters: list[ChannelAdapter] = []
+        dispatchers: list[SessionDispatcher] = []
+        runners: list[asyncio.Task[None]] = []
+        stop = asyncio.Event()
+
+        for inst, token in resolved:
+            dispatcher = SessionDispatcher(
+                settings,
+                provider_factory,
+                default_provider=inst.default_provider or "claude",
+            )
+            gate = PolicyGate(inst.to_policy(), dispatcher.handle_message)
+            adapter = WeChatAdapter(
+                instance_id=inst.instance_id,
+                base_url=inst.base_url,
+                token=token,
+                stop_event=stop,
+            )
+            adapter.set_handler(gate.handle)
+            dispatchers.append(dispatcher)
+            adapters.append(adapter)
+            runners.append(asyncio.create_task(adapter.run()))
+            print(f"channel started: {inst.instance_id} → {inst.base_url}")
+
+        try:
+            # Wait for any runner to exit (auth failure, etc.) or Ctrl-C.
+            done, pending = await asyncio.wait(
+                runners, return_when=asyncio.FIRST_COMPLETED
+            )
+            for t in done:
+                if t.exception():
+                    logger.error("adapter exited: %s", t.exception().__class__.__name__)
+        finally:
+            stop.set()
+            for a in adapters:
+                with contextlib.suppress(Exception):
+                    await a.aclose()
+            for d in dispatchers:
+                with contextlib.suppress(Exception):
+                    await d.aclose()
+            for t in runners:
+                if not t.done():
+                    t.cancel()
+                with contextlib.suppress(BaseException):
+                    await t
+
+    print(f"Starting {len(resolved)} channel(s). Ctrl-C to stop.")
+    try:
+        asyncio.run(_go())
+    except KeyboardInterrupt:
+        print("\nStopped.")
+    return 0
+
+
+# ---------- argparse wiring ---------------------------------------------------
+
+
+def register_subparsers(
+    channels_parser: argparse.ArgumentParser, common: argparse.ArgumentParser
+) -> None:
+    """Attach ``init`` / ``start`` / ``doctor`` under a top-level ``channels``.
+
+    Called from ``coding_bridge.cli.main`` so the entry point stays one file.
+    """
+    sub = channels_parser.add_subparsers(dest="channels_command", required=True)
+
+    p_init = sub.add_parser(
+        "init", help="Write a skeleton channels.toml (safe defaults)", parents=[common]
+    )
+    p_init.set_defaults(func=_dispatch_init)
+
+    p_start = sub.add_parser(
+        "start",
+        help="Run every enabled [[channels.wechat]] instance until Ctrl-C",
+        parents=[common],
+    )
+    p_start.set_defaults(func=_dispatch_start)
+
+    p_doctor = sub.add_parser(
+        "doctor",
+        help="Validate channels.toml + ping every enabled WeChat endpoint",
+        parents=[common],
+    )
+    p_doctor.set_defaults(func=_dispatch_doctor)
+
+
+def _dispatch_init(args: argparse.Namespace) -> None:
+    from .cli import _build_settings  # local import to avoid circular
+
+    raise SystemExit(cmd_channels_init(_build_settings(args)))
+
+
+def _dispatch_start(args: argparse.Namespace) -> None:
+    from .cli import _build_settings
+
+    raise SystemExit(cmd_channels_start(_build_settings(args)))
+
+
+def _dispatch_doctor(args: argparse.Namespace) -> None:
+    from .cli import _build_settings
+
+    raise SystemExit(cmd_channels_doctor(_build_settings(args)))
+
+
+__all__ = [
+    "cmd_channels_doctor",
+    "cmd_channels_init",
+    "cmd_channels_start",
+    "register_subparsers",
+]

@@ -17,13 +17,25 @@ from .base import (
     MessageHandler,
     SendResult,
 )
+from .config import (
+    ChannelsConfig,
+    ConfigError,
+    WeChatInstanceConfig,
+    load_channels_config,
+    parse_channels_config,
+)
 from .dispatcher import SessionDispatcher
 
 __all__ = [
     "ChannelAdapter",
     "ChannelTarget",
+    "ChannelsConfig",
+    "ConfigError",
     "IncomingMessage",
     "MessageHandler",
     "SendResult",
     "SessionDispatcher",
+    "WeChatInstanceConfig",
+    "load_channels_config",
+    "parse_channels_config",
 ]

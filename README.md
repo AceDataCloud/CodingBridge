@@ -94,6 +94,94 @@ Run flags (`up` / `run`):
 
 Global flags: `--bridge-url`, `--name`, `--config-dir`.
 
+## Chat channels (WeChat)
+
+Besides the browser/Nexior front-end, the daemon can be driven from a **personal
+WeChat account**: message the account and each message runs one Claude Code or
+Codex turn whose reply is sent straight back into the chat — handy for kicking
+off and steering tasks from your phone.
+
+A small **WeChat gateway** (a separate service you run, e.g. on a CVM) bridges
+WeChat and this daemon. The daemon connects _outbound_ to the gateway over a
+WebSocket, so — exactly like the relay path — it opens no listening ports and
+your code still only ever runs on your machine.
+
+```
+WeChat  ⇄  WeChat gateway  ⇄ (wss, outbound) ⇄  coding-bridge  ─►  Claude Code / Codex
+```
+
+### Setup
+
+```bash
+pipx install "coding-bridge[wechat]"   # marker extra; pulls no extra wheels
+coding-bridge channels init            # writes ~/.ace-bridge/channels.toml (0600)
+```
+
+Edit `~/.ace-bridge/channels.toml` — uncomment the `[[channels.wechat]]` block
+and fill it in:
+
+```toml
+[[channels.wechat]]
+instance_id = "my-wechat"               # unique per instance
+base_url = "http://127.0.0.1:8000"      # your WeChat gateway
+token_env = "WECHAT_TOKEN_MY_WECHAT"    # env var holding the token (never the token itself)
+enabled = true                          # explicit opt-in
+
+trigger_prefix = "/ask "                # only respond to messages starting with this
+allowed_senders = ["wxid_your_own_id"]  # allowlist; empty = allow all
+rate_limit_per_min = 6                  # per-sender sliding window; 0 disables
+dedup_window_seconds = 300.0            # drop upstream retries; 0 disables
+```
+
+The **token never lives in the file** — it references an env var (`token_env`)
+or a secrets-file path (`token_file`). Export it before starting:
+
+```bash
+export WECHAT_TOKEN_MY_WECHAT="…"
+```
+
+### Verify, then run
+
+```bash
+coding-bridge channels doctor   # validate config + confirm the token is accepted
+coding-bridge channels smoke    # run ONE real provider turn locally (no WeChat, no network)
+coding-bridge channels start    # connect and serve until Ctrl-C
+```
+
+| Command  | What it does                                                       |
+| -------- | ------------------------------------------------------------------ |
+| `init`   | Write a skeleton `channels.toml` (refuses to overwrite)            |
+| `doctor` | Validate `channels.toml` and ping every enabled gateway endpoint   |
+| `smoke`  | Run one real provider turn locally to prove your provider works    |
+| `start`  | Connect to each enabled gateway and serve replies until Ctrl-C     |
+
+`channels smoke` flags: `--provider {claude,codex,copilot}` (default `claude`),
+`--prompt` (default `"Reply with the single word: pong"`), `--timeout` seconds
+(default 120).
+
+To keep `channels start` running across logout/reboot, install it as a service —
+templates in [docs/deploy/](docs/deploy/README.md).
+
+### Example
+
+In WeChat, message your bridged account (the `default_provider` runs the turn):
+
+```
+You:  /ask what git branch am I on and is the tree clean?
+Bot:  You're on `main` with a clean working tree — nothing staged or modified.
+```
+
+### Safety
+
+- **Off by default.** Every instance is `enabled = false` until you flip it, so a
+  stray `channels.toml` never puts an unsupervised bot online.
+- **Gated inbound.** Trigger prefix, sender allowlist, per-sender rate limit, and
+  dedup all run _before_ any provider turn.
+- **No content in logs.** Only sizes and outcome codes are recorded per turn — the
+  message text and the reply body are never written to logs.
+- **Same local trust boundary.** Provider turns run on your machine under your
+  account; the gateway only relays messages.
+
 ## Configuration
 
 All settings can come from the environment (see [.env.example](.env.example)):

@@ -254,6 +254,10 @@ function renderOverview(){
       el("span",{class:"pill"}, el("span",{class:"dot"+(it.enabled?"":" off")}), it.enabled?"enabled":"disabled")));
   });
   card.append(list);
+  card.append(el("div",{class:"row",style:"margin-top:12px;gap:8px;flex-wrap:wrap"},
+    el("span",{class:"hint",style:"margin-right:2px"},"Add a channel:"),
+    el("button",{class:"btn ghost",style:"border:1px solid var(--border)",onclick:()=>addChannel("wechat")},"＋ WeChat"),
+    el("button",{class:"btn ghost",style:"border:1px solid var(--border)",onclick:()=>addChannel("telegram")},"＋ Telegram")));
   return card;
 }
 
@@ -264,6 +268,88 @@ function refreshOverview(){
 function select(i){
   if(i===STATE.idx) return;
   stopQrPoll(); STATE.idx=i; render(); loadForCurrent();
+}
+
+function newInstance(type){
+  const it={ type:type, instance_id:"", token_source:{kind:"env",ref:""}, token_resolvable:false,
+    enabled:false, require_approval:false, default_provider:"claude", trigger_prefix:"/ask ", free_form:false,
+    allowed_senders:[], allowed_groups:[], rate_limit_per_min:6, dedup_window_seconds:300 };
+  if(type==="telegram") it.api_base="https://api.telegram.org"; else it.base_url="";
+  return it;
+}
+
+function addChannel(type){
+  STATE.instances.push(newInstance(type));
+  STATE.idx=STATE.instances.length-1;
+  render();
+  toast((type==="telegram"?"Telegram":"WeChat")+" channel added — fill it in below, then Save");
+}
+
+function removeCurrent(){
+  const it=current(); if(!it) return;
+  if(!window.confirm("Remove channel \u201C"+(it.instance_id||"(unnamed)")+"\u201D? It is deleted from channels.toml when you click Save.")) return;
+  STATE.instances.splice(STATE.idx,1);
+  STATE.idx=Math.min(STATE.idx, STATE.instances.length-1);
+  if(STATE.idx<0) STATE.idx=0;
+  toast("Channel removed — click Save to write channels.toml");
+  if(!STATE.instances.length){
+    const app=$("#app"); app.innerHTML="";
+    app.append(el("div",{id:"approvals"}));
+    app.append(renderOverview());
+    app.append(el("div",{class:"card"}, el("h2",{},"No channels left"),
+      el("p",{class:"hint"},"Click Save to write the now-empty channels.toml, or add a channel above.")));
+    return;
+  }
+  render(); loadForCurrent();
+}
+
+function connectionCard(it){
+  const isTg=it.type==="telegram";
+  const card=el("div",{class:"card"},
+    el("h2",{},"Connection"),
+    el("p",{class:"hint"},"Instance id, endpoint, and where the token is read from — the portal stores an env-var name or a file path, never the token itself."));
+  card.append(el("label",{class:"fld"},"Instance ID (unique)"));
+  const idin=el("input",{type:"text",id:"cid",value:it.instance_id||"",placeholder:isTg?"my-telegram":"my-wechat",autocomplete:"off"});
+  idin.addEventListener("input",()=>{ it.instance_id=idin.value.trim(); });
+  card.append(idin);
+  if(isTg){
+    card.append(el("label",{class:"fld"},"Bot API base (optional — self-hosted Bot API)"));
+    const u=el("input",{type:"text",id:"cbase",value:it.api_base||"https://api.telegram.org",autocomplete:"off"});
+    u.addEventListener("input",()=>{ it.api_base=u.value.trim(); });
+    card.append(u);
+  } else {
+    card.append(el("label",{class:"fld"},"WeChat gateway base URL"));
+    const u=el("input",{type:"text",id:"cbase",value:it.base_url||"",placeholder:"http://127.0.0.1:8000",autocomplete:"off"});
+    u.addEventListener("input",()=>{ it.base_url=u.value.trim(); });
+    card.append(u);
+  }
+  card.append(el("label",{class:"fld"},"Token source"));
+  const kind=(it.token_source&&it.token_source.kind==="file")?"file":"env";
+  card.append(el("div",{class:"seg"},
+    el("button",{id:"ts-env",class:kind==="env"?"on":"",onclick:()=>setTokenKind("env")},"Env var"),
+    el("button",{id:"ts-file",class:kind==="file"?"on":"",onclick:()=>setTokenKind("file")},"File path")));
+  const ref=el("input",{type:"text",id:"tref",style:"margin-top:10px",value:(it.token_source&&it.token_source.ref)||"",
+    placeholder: kind==="file"?"/run/secrets/mybot-token":(isTg?"TELEGRAM_TOKEN_MYBOT":"WECHAT_TOKEN_MYWECHAT"),autocomplete:"off"});
+  ref.addEventListener("input",()=>{ it.token_source={kind:(it.token_source&&it.token_source.kind)||"env", ref:ref.value.trim()}; });
+  card.append(ref);
+  card.append(el("p",{class:"hint",style:"margin:8px 0 0"}, isTg
+    ? "Export the env var before `channels start`; `channels doctor` verifies it via getMe."
+    : "Export the env var before `channels start`."));
+  return card;
+}
+
+function setTokenKind(kind){
+  const it=current(); const rEl=$("#tref"); const ref=(rEl?rEl.value:"").trim();
+  it.token_source={kind:kind, ref:ref};
+  const e=$("#ts-env"), f=$("#ts-file"); if(e)e.className=kind==="env"?"on":""; if(f)f.className=kind==="file"?"on":"";
+  if(rEl) rEl.placeholder = kind==="file"?"/run/secrets/mybot-token":(it.type==="telegram"?"TELEGRAM_TOKEN_MYBOT":"WECHAT_TOKEN_MYWECHAT");
+}
+
+function deleteCard(it){
+  return el("div",{class:"card",style:"border-color:var(--danger)"},
+    el("h2",{},"Remove channel"),
+    el("p",{class:"hint"},"Delete this channel from channels.toml. Takes effect when you click Save."),
+    el("button",{class:"btn deny",onclick:()=>removeCurrent()},"Delete this channel"));
 }
 
 function render(){
@@ -336,6 +422,8 @@ function renderWeChatEditor(app,it){
       "⚠ Token not resolvable ("+(it.token_source.kind==="none"?"no token_env/token_file set":it.token_source.kind+": "+it.token_source.ref)+"). Contacts/groups won't load until it's set."));
   }
 
+  app.append(connectionCard(it));
+
   // access card
   const access=el("div",{class:"card"},
     el("h2",{},"Access — who can drive the bot"),
@@ -361,6 +449,7 @@ function renderWeChatEditor(app,it){
   app.append(g);
 
   app.append(safetyCard(it));
+  app.append(deleteCard(it));
 }
 
 function renderTelegramEditor(app,it){
@@ -380,6 +469,8 @@ function renderTelegramEditor(app,it){
   } else {
     acct.append(el("div",{class:"pill",id:"tgstatus",style:"margin-top:10px"},"checking bot token…"));
   }
+
+  app.append(connectionCard(it));
 
   // access — manual sender-id allowlist
   const access=el("div",{class:"card"},
@@ -404,6 +495,7 @@ function renderTelegramEditor(app,it){
   app.append(g);
 
   app.append(safetyCard(it));
+  app.append(deleteCard(it));
 
   if(it.token_resolvable) loadTelegramStatus();
 }

@@ -737,3 +737,75 @@ def test_index_save_payload_carries_type_and_channel_fields():
     assert "type: it.type" in INDEX_HTML
     assert "o.api_base=it.api_base" in INDEX_HTML
     assert "require_approval: it.require_approval" in INDEX_HTML
+
+
+# --------------------------------------------------------------------------- #
+# Add / remove channels from the portal (save is a full-file rewrite)
+# --------------------------------------------------------------------------- #
+
+
+def test_save_empty_list_writes_empty_config(tmp_path, monkeypatch):
+    """Removing every channel and saving writes an empty (but valid) config."""
+    monkeypatch.setenv("WT", "gw-secret")
+    s = _settings(tmp_path)
+    (tmp_path / "channels.toml").write_text(
+        dump_channels_toml(ChannelsConfig(wechat=(_inst(),))), encoding="utf-8"
+    )
+    svc = PortalService(s, client=httpx.Client(transport=_tg_getme_transport()))
+    result = svc.save([])
+    assert result["instances"] == []
+    reloaded = load_channels_config(tmp_path / "channels.toml")
+    assert reloaded.wechat == () and reloaded.telegram == ()
+    svc.close()
+
+
+def test_save_add_then_remove_roundtrip(tmp_path, monkeypatch):
+    """Adding a brand-new instance then removing one both go through save()."""
+    monkeypatch.setenv("WT", "gw-secret")
+    monkeypatch.setenv("TT", "tg-secret")
+    s = _settings(tmp_path)
+    svc = PortalService(s, client=httpx.Client(transport=_tg_getme_transport()))
+    # add: post the existing wechat + a freshly-created telegram instance
+    added = svc.save(
+        [
+            {"type": "wechat", "instance_id": "wx", "base_url": "http://gw", "token_env": "WT"},
+            {"type": "telegram", "instance_id": "tg-new", "token_env": "TT", "enabled": False},
+        ]
+    )
+    assert {i["instance_id"] for i in added["instances"]} == {"wx", "tg-new"}
+    # remove: post only the wechat instance back (telegram dropped)
+    removed = svc.save(
+        [{"type": "wechat", "instance_id": "wx", "base_url": "http://gw", "token_env": "WT"}]
+    )
+    assert [i["instance_id"] for i in removed["instances"]] == ["wx"]
+    reloaded = load_channels_config(tmp_path / "channels.toml")
+    assert reloaded.telegram == ()
+    svc.close()
+
+
+def test_save_new_instance_without_id_is_rejected(tmp_path, monkeypatch):
+    """A newly-added instance with no instance_id fails validation (clear 400)."""
+    s = _settings(tmp_path)
+    svc = PortalService(s, client=httpx.Client(transport=_tg_getme_transport()))
+    with pytest.raises(PortalError) as ei:
+        svc.save([{"type": "telegram", "enabled": True}])
+    assert ei.value.status == 400
+    svc.close()
+
+
+def test_index_has_add_remove_channel_controls():
+    """Regression guard: the client exposes add/remove + a connection editor
+    (instance_id / endpoint / token source), so channels can be created and
+    deleted from the portal instead of hand-editing channels.toml."""
+    from coding_bridge.channels.portal_html import INDEX_HTML
+
+    for token in (
+        "function addChannel",
+        "function removeCurrent",
+        "function connectionCard",
+        "function newInstance",
+        "Delete this channel",
+        "Add a channel",
+    ):
+        assert token in INDEX_HTML
+

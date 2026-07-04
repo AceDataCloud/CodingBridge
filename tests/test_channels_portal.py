@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import socket
 import threading
+import time
 from http.server import ThreadingHTTPServer
 
 import httpx
@@ -938,6 +939,148 @@ def test_index_has_recent_senders_control():
         "function addTgSender",
         "Load recent senders",
         "/api/telegram/senders",
+    ):
+        assert token in INDEX_HTML
+
+
+# --------------------------------------------------------------------------- #
+# Run-status panel (StatusStore heartbeat + turn ring, read by the portal)
+# --------------------------------------------------------------------------- #
+
+
+def test_status_store_run_and_turns(tmp_path):
+    from coding_bridge.channels.status import StatusStore
+
+    store = StatusStore(tmp_path / "status")
+    assert store.is_running() is False
+    store.write_run([{"adapter": "wechat", "instance_id": "wx"}], started_at=time.time())
+    assert store.is_running() is True
+    assert store.read_run()["channels"][0]["instance_id"] == "wx"
+    store.record_turn({"ts": time.time(), "adapter": "telegram", "outcome": "ok"})
+    store.record_turn({"ts": time.time(), "adapter": "wechat", "outcome": "timeout"})
+    turns = store.read_turns()
+    assert [t["outcome"] for t in turns] == ["timeout", "ok"]  # newest first
+    store.clear_run()
+    assert store.is_running() is False
+
+
+def test_status_store_ring_bounded(tmp_path):
+    from coding_bridge.channels.status import StatusStore
+
+    store = StatusStore(tmp_path / "status", max_turns=3)
+    for i in range(6):
+        store.record_turn({"ts": i, "adapter": "telegram", "outcome": "ok"})
+    turns = store.read_turns(limit=100)
+    assert [t["ts"] for t in turns] == [5, 4, 3]  # bounded to 3, newest first
+
+
+def test_status_store_stale_heartbeat_not_running(tmp_path):
+    import json as _json
+
+    from coding_bridge.channels.status import StatusStore
+
+    (tmp_path / "status").mkdir(parents=True)
+    (tmp_path / "status" / "run.json").write_text(
+        _json.dumps({"pid": 1, "started_at": 0, "updated_at": 0, "channels": []}),
+        encoding="utf-8",
+    )
+    assert StatusStore(tmp_path / "status").is_running() is False  # ancient → stopped
+
+
+def test_status_overview_running_and_stopped(tmp_path, monkeypatch):
+    from coding_bridge.channels.status import StatusStore
+
+    s = _settings(tmp_path)
+    svc = PortalService(s, client=httpx.Client(transport=_tg_getme_transport()))
+    ov = svc.status_overview()
+    assert ov["running"] is False and ov["channels"] == [] and ov["recent_turns"] == []
+    store = StatusStore(tmp_path / "status")
+    store.write_run([{"adapter": "telegram", "instance_id": "tg"}], started_at=time.time())
+    store.record_turn(
+        {"ts": time.time(), "adapter": "telegram", "instance_id": "tg", "outcome": "ok"}
+    )
+    ov = svc.status_overview()
+    assert ov["running"] is True
+    assert ov["channels"][0]["instance_id"] == "tg"
+    assert ov["recent_turns"][0]["outcome"] == "ok"
+    svc.close()
+
+
+def test_http_status_route(tmp_path, monkeypatch):
+    from coding_bridge.channels.status import StatusStore
+
+    s = _settings(tmp_path)
+    StatusStore(tmp_path / "status").write_run(
+        [{"adapter": "wechat", "instance_id": "wx"}], started_at=time.time()
+    )
+    svc = PortalService(s, client=httpx.Client(transport=_tg_getme_transport()))
+    token = "tk"
+    port = _free_port()
+    httpd = ThreadingHTTPServer(("127.0.0.1", port), _make_handler(svc, token, port))
+    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+    thread.start()
+    try:
+        r = httpx.get(
+            f"http://127.0.0.1:{port}/api/status", headers={"X-Portal-Token": token}, timeout=5
+        )
+        assert r.status_code == 200 and r.json()["running"] is True
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+        svc.close()
+
+
+def test_observability_turn_sink_and_isolation():
+    from coding_bridge.channels.observability import TurnEvent, log_turn, set_turn_sink
+
+    seen: list[TurnEvent] = []
+    set_turn_sink(seen.append)
+    try:
+        log_turn(
+            TurnEvent(
+                adapter="telegram", instance_id="tg", provider="claude", outcome="ok",
+                latency_ms=10, prompt_chars=1, reply_chars=2, session_id="s1",
+            )
+        )
+    finally:
+        set_turn_sink(None)
+    assert len(seen) == 1 and seen[0].instance_id == "tg"
+    # cleared → no more
+    log_turn(
+        TurnEvent(
+            adapter="a", instance_id="b", provider="c", outcome="ok",
+            latency_ms=0, prompt_chars=0, reply_chars=0, session_id="s2",
+        )
+    )
+    assert len(seen) == 1
+
+
+def test_observability_sink_failure_never_raises():
+    from coding_bridge.channels.observability import TurnEvent, log_turn, set_turn_sink
+
+    def boom(_ev):
+        raise RuntimeError("sink down")
+
+    set_turn_sink(boom)
+    try:
+        log_turn(  # must not raise despite the failing sink
+            TurnEvent(
+                adapter="a", instance_id="b", provider="c", outcome="ok",
+                latency_ms=0, prompt_chars=0, reply_chars=0, session_id="s",
+            )
+        )
+    finally:
+        set_turn_sink(None)
+
+
+def test_index_has_status_panel():
+    from coding_bridge.channels.portal_html import INDEX_HTML
+
+    for token in (
+        "function renderStatus",
+        "function startStatusPoll",
+        "/api/status",
+        "Recent turns",
     ):
         assert token in INDEX_HTML
 

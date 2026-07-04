@@ -353,6 +353,29 @@ class PortalService:
     def decide_approval(self, request_id: str, decision: str) -> bool:
         return self._approvals.decide(request_id, decision)
 
+    # ---- run status (read-only view of the `channels start` daemon) ---- #
+
+    def status_overview(self) -> dict[str, Any]:
+        """Whether the daemon is running + a content-free recent-turn ring."""
+        from .status import StatusStore
+
+        store = StatusStore(self._settings.config_dir / "status")
+        run = store.read_run()
+        running = store.is_running()
+        started_at: float | None = None
+        channels: list[dict[str, Any]] = []
+        if running and isinstance(run, dict):
+            sa = run.get("started_at")
+            started_at = float(sa) if isinstance(sa, (int, float)) else None
+            ch = run.get("channels")
+            channels = ch if isinstance(ch, list) else []
+        return {
+            "running": running,
+            "started_at": started_at,
+            "channels": channels,
+            "recent_turns": store.read_turns(limit=15),
+        }
+
     # ---- WeChat gateway proxy ------------------------------------------- #
 
     def _gateway_request(
@@ -836,6 +859,8 @@ def _make_handler(service: PortalService, token: str, port: int) -> type[BaseHTT
                     self._send_json(200, service.public_config())
                 elif path == "/api/approvals":
                     self._send_json(200, {"approvals": service.list_approvals()})
+                elif path == "/api/status":
+                    self._send_json(200, service.status_overview())
                 elif path == "/api/wechat/account":
                     self._send_json(200, service.account(instance))
                 elif path == "/api/wechat/status":

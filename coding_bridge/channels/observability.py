@@ -18,6 +18,7 @@ record with the fields attached via ``extra=``, so:
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Literal
 
@@ -42,6 +43,20 @@ class TurnEvent:
     # Opaque per-turn id (the dispatcher's session id) so a log line can be
     # tied back to a provider session without exposing content.
     session_id: str
+
+
+_turn_sink: Callable[[TurnEvent], None] | None = None
+
+
+def set_turn_sink(sink: Callable[[TurnEvent], None] | None) -> None:
+    """Register (or clear) an extra per-turn sink, invoked after the log record.
+
+    ``channels start`` uses this to mirror turn metrics into the status ring the
+    portal reads. Optional + failure-isolated: with no sink registered the turn
+    path is byte-for-byte unchanged.
+    """
+    global _turn_sink
+    _turn_sink = sink
 
 
 def log_turn(event: TurnEvent) -> None:
@@ -72,3 +87,9 @@ def log_turn(event: TurnEvent) -> None:
             "channel_reply_chars": event.reply_chars,
         },
     )
+    sink = _turn_sink
+    if sink is not None:
+        try:
+            sink(event)
+        except Exception:  # observability must never break a turn
+            logger.debug("channel turn sink failed", exc_info=True)

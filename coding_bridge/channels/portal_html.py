@@ -100,6 +100,15 @@ select#inst{width:auto;min-width:170px}
 .appr .btn{padding:7px 14px}
 .btn.approve{background:var(--ok);color:#fff}
 .btn.deny{background:transparent;color:var(--danger);border:1px solid var(--danger)}
+.bigdot{width:11px;height:11px;border-radius:50%;background:var(--ok);box-shadow:0 0 0 4px color-mix(in srgb,var(--ok) 20%,transparent);flex:0 0 auto}
+.bigdot.off{background:var(--muted);box-shadow:0 0 0 4px color-mix(in srgb,var(--muted) 16%,transparent)}
+.turnrow{display:flex;align-items:center;gap:8px;padding:5px 0;font-size:12.5px;border-top:1px solid var(--border)}
+.turnrow:first-of-type{border-top:0}
+.tdot{width:7px;height:7px;border-radius:50%;flex:0 0 auto}
+.tdot.ok{background:var(--ok)}
+.tdot.bad{background:var(--danger)}
+.tadapter{font-weight:600}
+.tmeta{color:var(--muted);margin-left:auto;font-family:ui-monospace,Menlo,Consolas,monospace;font-size:11px}
 .chanlist{display:flex;flex-direction:column;gap:6px;margin-top:6px}
 .chan{display:flex;align-items:center;gap:12px;padding:11px 12px;border:1px solid var(--border);border-radius:12px;cursor:pointer;background:var(--bg)}
 .chan:hover{border-color:var(--accent)}
@@ -165,19 +174,22 @@ async function api(path,opts={}){
 let STATE={instances:[],idx:0,contacts:new Map()};
 let qrPollTimer=null;
 let approvalPollTimer=null;
+let statusPollTimer=null;
+let lastStatus=null;
 function stopQrPoll(){ if(qrPollTimer){ clearInterval(qrPollTimer); qrPollTimer=null; } }
 function stopApprovalPoll(){ if(approvalPollTimer){ clearInterval(approvalPollTimer); approvalPollTimer=null; } }
+function stopStatusPoll(){ if(statusPollTimer){ clearInterval(statusPollTimer); statusPollTimer=null; } }
 
 function current(){return STATE.instances[STATE.idx];}
 
 async function load(){
-  stopQrPoll(); stopApprovalPoll();
+  stopQrPoll(); stopApprovalPoll(); stopStatusPoll();
   const cfg=await api("/api/config"); STATE.instances=cfg.instances; STATE.idx=0;
   $("#cfgpath").textContent=cfg.config_path;
   $("#instwrap").innerHTML="";
   if(!STATE.instances.length){ $("#app").innerHTML=""; $("#app").append(noInstances()); $("#bar").style.display="none"; return; }
   $("#bar").style.display="block"; render();
-  loadForCurrent(); startApprovalPoll();
+  loadForCurrent(); startApprovalPoll(); startStatusPoll();
 }
 
 function loadForCurrent(){
@@ -201,6 +213,46 @@ function startApprovalPoll(){
   };
   tick();
   approvalPollTimer=setInterval(tick, 2500);
+}
+
+function startStatusPoll(){
+  stopStatusPoll();
+  const tick=async ()=>{ let d; try{ d=await api("/api/status"); }catch(e){ return; } renderStatus(d); };
+  tick();
+  statusPollTimer=setInterval(tick, 5000);
+}
+
+function fmtDur(sec){ sec=Math.max(0,Math.floor(sec)); const h=Math.floor(sec/3600),m=Math.floor(sec%3600/60),s=sec%60; return h?(h+"h "+m+"m"):(m?(m+"m "+s+"s"):(s+"s")); }
+
+function renderStatus(d){
+  lastStatus=d;
+  const box=$("#status"); if(!box) return;
+  const running=!!(d&&d.running);
+  const chans=(d&&d.channels)||[];
+  const card=el("div",{class:"card",id:"statuscard",style:running?"border-color:var(--ok)":""});
+  const up=(running&&d.started_at)?(" · up "+fmtDur(Date.now()/1000 - d.started_at)):"";
+  card.append(el("div",{class:"row",style:"align-items:center;gap:11px"},
+    el("span",{class:"bigdot"+(running?"":" off")}),
+    el("div",{style:"flex:1;min-width:0"},
+      el("div",{style:"font-weight:650"}, running?("Daemon running — "+chans.length+" channel"+(chans.length===1?"":"s")):"Daemon stopped"),
+      el("div",{class:"pill"}, running?("channels start is serving"+up):"run `coding-bridge channels start` to go live")),
+    el("button",{class:"btn ghost",style:"border:1px solid var(--border)",onclick:()=>startStatusPoll()},"Refresh")));
+  const turns=(d&&d.recent_turns)||[];
+  if(turns.length){
+    const t=el("div",{style:"margin-top:12px"});
+    t.append(el("label",{class:"fld",style:"margin:0 0 4px"},"Recent turns (no message content)"));
+    turns.slice(0,8).forEach(tr=>{
+      const ok=tr.outcome==="ok";
+      t.append(el("div",{class:"turnrow"},
+        el("span",{class:"tdot "+(ok?"ok":"bad")}),
+        el("span",{class:"tadapter"}, (tr.adapter||"?")+"/"+(tr.instance_id||"?")),
+        el("span",{class:"tmeta"}, (tr.provider||"")+" · "+(tr.outcome||"")+" · "+(tr.latency_ms||0)+"ms · "+(tr.reply_chars||0)+"c")));
+    });
+    card.append(t);
+  } else if(running){
+    card.append(el("div",{class:"empty",style:"margin-top:8px"},"no turns yet — message a channel to see activity"));
+  }
+  box.replaceChildren(card);
 }
 
 function renderApprovals(list){
@@ -355,6 +407,8 @@ function deleteCard(it){
 function render(){
   const it=current(); const app=$("#app"); app.innerHTML="";
   app.append(el("div",{id:"approvals"}));
+  app.append(el("div",{id:"status"}));
+  if(lastStatus) renderStatus(lastStatus);
   app.append(renderOverview());
   app.append(el("div",{id:"onboarding"}));
   if(it.type==="telegram") renderTelegramEditor(app,it);

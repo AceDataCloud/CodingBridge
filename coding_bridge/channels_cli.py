@@ -21,6 +21,7 @@ import argparse
 import asyncio
 import contextlib
 import logging
+import os
 import stat
 import sys
 import time
@@ -572,6 +573,50 @@ def cmd_channels_portal(
     return serve(settings, host=host, port=port, open_browser=open_browser)
 
 
+# ---------- install-service ---------------------------------------------------
+
+
+def cmd_channels_install_service(settings: Settings, *, force: bool) -> int:
+    """Write a user-scoped OS service that runs `channels start` at login/boot.
+
+    Generates the unit file only + prints the single command that enables it —
+    it never enables/starts the service or touches anything system-wide itself.
+    """
+    import platform as _platform
+
+    from .channels.service import build_service_plan
+
+    system = _platform.system().lower()
+    try:
+        plan = build_service_plan(system, sys.executable, settings.config_dir, Path.home())
+    except ValueError:
+        print(
+            f"install-service isn't supported on this platform ({system or 'unknown'}). "
+            "See docs/deploy/ for manual templates.",
+            file=sys.stderr,
+        )
+        return 2
+    if plan.path.exists() and not force:
+        print(f"Refusing to overwrite existing {plan.path} (pass --force).", file=sys.stderr)
+        return 1
+    try:
+        plan.path.parent.mkdir(parents=True, exist_ok=True)
+        plan.path.write_text(plan.content, encoding="utf-8")
+        if os.name == "posix":
+            with contextlib.suppress(OSError):
+                plan.path.chmod(0o700 if plan.kind == "schtasks" else 0o600)
+    except OSError as exc:
+        print(f"could not write {plan.path}: {exc.__class__.__name__}", file=sys.stderr)
+        return 1
+    print(f"Wrote {plan.kind} unit → {plan.path}")
+    print("\nActivate it (starts `coding-bridge channels start` in the background):")
+    for cmd in plan.activate:
+        print(f"  {cmd}")
+    for note in plan.notes:
+        print(f"\nnote: {note}")
+    return 0
+
+
 # ---------- argparse wiring ---------------------------------------------------
 
 
@@ -640,6 +685,16 @@ def register_subparsers(
     )
     p_portal.set_defaults(func=_dispatch_portal)
 
+    p_svc = sub.add_parser(
+        "install-service",
+        help="Write an OS service unit that runs `channels start` at login/boot",
+        parents=[common],
+    )
+    p_svc.add_argument(
+        "--force", action="store_true", help="Overwrite an existing unit file."
+    )
+    p_svc.set_defaults(func=_dispatch_install_service)
+
 
 def _dispatch_init(args: argparse.Namespace) -> None:
     from .cli import _build_settings  # local import to avoid circular
@@ -685,9 +740,16 @@ def _dispatch_portal(args: argparse.Namespace) -> None:
     )
 
 
+def _dispatch_install_service(args: argparse.Namespace) -> None:
+    from .cli import _build_settings
+
+    raise SystemExit(cmd_channels_install_service(_build_settings(args), force=args.force))
+
+
 __all__ = [
     "cmd_channels_doctor",
     "cmd_channels_init",
+    "cmd_channels_install_service",
     "cmd_channels_portal",
     "cmd_channels_smoke",
     "cmd_channels_start",

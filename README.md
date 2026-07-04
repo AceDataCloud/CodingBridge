@@ -1,8 +1,9 @@
 # Coding Bridge Agent
 
-Run **Claude Code** or **OpenAI Codex** on your own machine and drive it from the
-AceDataCloud web app (Nexior) or your phone — without exposing your machine to
-the internet.
+Run **Claude Code** or **OpenAI Codex** on your own machine and drive it from
+wherever you already are — the AceDataCloud web app (Nexior), your phone, or a
+**chat account you already use (WeChat / Telegram)** — without exposing your
+machine to the internet.
 
 The agent is a small, outbound-only daemon. It connects to the
 [coding-bridge](https://coding-bridge.acedata.cloud) relay, registers your
@@ -20,13 +21,27 @@ your files and never runs anything.
                                                                               runs on YOUR machine
 ```
 
+**Two ways to drive it — same daemon, same local trust boundary:**
+
+- **Browser / phone** — the [Nexior](https://studio.acedata.cloud) web & mobile
+  app pairs your machine and renders full interactive sessions (the diagram
+  above). Start it with `coding-bridge up`.
+- **A chat account you already use** — message a **WeChat** or **Telegram** bot
+  and every message runs one Claude Code / Codex turn, with the reply sent
+  straight back into the chat. Nothing to install on your phone; great for
+  kicking off and steering tasks on the go. Start it with
+  `coding-bridge channels start` — see
+  [Chat channels](#chat-channels-wechat--telegram) below.
+
+Either way, code execution, files, and tool approvals never leave your hardware.
+
 ## Why
 
 You want the power of Claude Code (your repo, your shell, your MCP servers) but
-the convenience of kicking off and steering tasks from a browser or phone while
-away from your desk. This daemon makes that possible while keeping the trust
-boundary where it belongs: **on your hardware**. Every tool the agent wants to
-run is surfaced to your browser as an approval prompt that you allow or deny.
+the convenience of kicking off and steering tasks from a browser, your phone, or
+a WeChat / Telegram chat while away from your desk. This daemon makes that
+possible while keeping the trust boundary where it belongs: **on your hardware**.
+Every tool the agent wants to run is surfaced for an approval you allow or deny.
 
 ## Install
 

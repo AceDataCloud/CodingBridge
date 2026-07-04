@@ -480,6 +480,10 @@ function renderTelegramEditor(app,it){
   senders.value=(it.allowed_senders||[]).join("\n");
   senders.addEventListener("input",()=>{ it.allowed_senders=splitLines(senders.value); });
   access.append(senders);
+  access.append(el("div",{class:"row",style:"margin-top:10px;gap:8px;align-items:center;flex-wrap:wrap"},
+    el("button",{class:"btn ghost",style:"border:1px solid var(--border)",onclick:()=>loadRecentSenders()},"Load recent senders"),
+    el("span",{class:"hint"},"Message the bot first, then load and click a name to allowlist it (works while `channels start` is stopped).")));
+  access.append(el("div",{id:"tgrecent",class:"grouplist",style:"margin-top:8px"}));
   app.append(access);
 
   app.append(behaviorCard(it,{dedup:true}));
@@ -513,6 +517,35 @@ async function loadTelegramStatus(){
     box.innerHTML=""; box.append(el("span",{class:"dot off"}),
       document.createTextNode(" "+String(e.message||"token check failed")));
   }
+}
+
+async function loadRecentSenders(){
+  const it=current(); if(!it||it.type!=="telegram") return;
+  const box=$("#tgrecent"); if(!box) return;
+  if(!it.token_resolvable){ box.replaceChildren(el("div",{class:"empty"},"set the bot token first, then Save")); return; }
+  box.replaceChildren(el("div",{class:"empty"},"loading…"));
+  try{
+    const d=await api("/api/telegram/senders?instance="+encodeURIComponent(it.instance_id));
+    box.innerHTML="";
+    const list=d.senders||[];
+    if(!list.length){ box.append(el("div",{class:"empty"},"no recent messages — send your bot a message, then click again")); return; }
+    list.forEach(sd=>{
+      const chosen=(it.allowed_senders||[]).includes(sd.id);
+      box.append(el("div",{class:"grp",style:"cursor:pointer",onclick:()=>addTgSender(sd)},
+        el("div",{class:"avatar sm"}, initials(sd.name)),
+        el("div",{style:"flex:1;min-width:0"},
+          el("div",{class:"nm"}, sd.name+(sd.username?(" (@"+sd.username+")"):"")),
+          el("div",{class:"id"}, sd.id+(sd.chat_type&&sd.chat_type!=="private"?(" · "+sd.chat_type):""))),
+        chosen?el("div",{class:"pill"},"added"):el("div",{class:"pill",style:"color:var(--accent)"},"+ add")));
+    });
+  }catch(e){ box.innerHTML=""; box.append(el("div",{class:"empty"},String(e.message||"failed"))); }
+}
+
+function addTgSender(sd){
+  const it=current(); if(!it) return;
+  if(!(it.allowed_senders||[]).includes(sd.id)){ it.allowed_senders=(it.allowed_senders||[]).concat([sd.id]); }
+  const ta=$("#tgsenders"); if(ta) ta.value=it.allowed_senders.join("\n");
+  loadRecentSenders();
 }
 
 function setTrigger(free){

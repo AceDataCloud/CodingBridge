@@ -809,3 +809,135 @@ def test_index_has_add_remove_channel_controls():
     ):
         assert token in INDEX_HTML
 
+
+# --------------------------------------------------------------------------- #
+# Telegram "recent senders" (getUpdates peek → allowlist candidates)
+# --------------------------------------------------------------------------- #
+
+
+def _tg_getupdates_transport(result, *, ok=True, error_code=409):
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/getUpdates"):
+            if ok:
+                return httpx.Response(200, json={"ok": True, "result": result})
+            return httpx.Response(
+                200, json={"ok": False, "error_code": error_code, "description": "Conflict"}
+            )
+        return httpx.Response(404, json={})
+
+    return httpx.MockTransport(handler)
+
+
+def _seed_tg(tmp_path):
+    (tmp_path / "channels.toml").write_text(
+        dump_channels_toml(ChannelsConfig(telegram=(_tg_inst(),))), encoding="utf-8"
+    )
+
+
+def test_telegram_recent_senders_parses_and_dedups(tmp_path, monkeypatch):
+    monkeypatch.setenv("TT", "tg-secret")
+    s = _settings(tmp_path)
+    _seed_tg(tmp_path)
+    updates = [
+        {
+            "update_id": 1,
+            "message": {
+                "from": {"id": 111, "username": "alice", "first_name": "Alice"},
+                "chat": {"id": 111, "type": "private"},
+                "text": "/ask hi",
+            },
+        },
+        {
+            "update_id": 2,
+            "message": {
+                "from": {"id": 222, "first_name": "Bob"},
+                "chat": {"id": -100, "type": "supergroup"},
+                "text": "/ask yo",
+            },
+        },
+        {  # same sender again → deduped
+            "update_id": 3,
+            "message": {
+                "from": {"id": 111, "username": "alice", "first_name": "Alice"},
+                "chat": {"id": 111, "type": "private"},
+                "text": "again",
+            },
+        },
+        {"update_id": 4, "edited_message": {"from": {"id": 999}, "text": "x"}},  # not a message
+    ]
+    svc = PortalService(s, client=httpx.Client(transport=_tg_getupdates_transport(updates)))
+    senders = svc.telegram_recent_senders("tg1")
+    assert {x["id"] for x in senders} == {"111", "222"}  # deduped, edited ignored
+    by_id = {x["id"]: x for x in senders}
+    assert by_id["111"]["username"] == "alice" and by_id["111"]["name"] == "Alice"
+    assert by_id["222"]["username"] is None and by_id["222"]["chat_type"] == "supergroup"
+    svc.close()
+
+
+def test_telegram_recent_senders_409_is_busy(tmp_path, monkeypatch):
+    monkeypatch.setenv("TT", "tg-secret")
+    s = _settings(tmp_path)
+    _seed_tg(tmp_path)
+    svc = PortalService(
+        s, client=httpx.Client(transport=_tg_getupdates_transport(None, ok=False, error_code=409))
+    )
+    with pytest.raises(PortalError) as ei:
+        svc.telegram_recent_senders("tg1")
+    assert ei.value.status == 409 and "channels start" in ei.value.message
+    svc.close()
+
+
+def test_telegram_recent_senders_empty(tmp_path, monkeypatch):
+    monkeypatch.setenv("TT", "tg-secret")
+    s = _settings(tmp_path)
+    _seed_tg(tmp_path)
+    svc = PortalService(s, client=httpx.Client(transport=_tg_getupdates_transport([])))
+    assert svc.telegram_recent_senders("tg1") == []
+    svc.close()
+
+
+def test_http_telegram_senders_route(tmp_path, monkeypatch):
+    monkeypatch.setenv("TT", "tg-secret")
+    s = _settings(tmp_path)
+    _seed_tg(tmp_path)
+    updates = [
+        {
+            "update_id": 1,
+            "message": {
+                "from": {"id": 111, "username": "alice", "first_name": "Alice"},
+                "chat": {"id": 111, "type": "private"},
+                "text": "hi",
+            },
+        }
+    ]
+    svc = PortalService(s, client=httpx.Client(transport=_tg_getupdates_transport(updates)))
+    token = "tk"
+    port = _free_port()
+    httpd = ThreadingHTTPServer(("127.0.0.1", port), _make_handler(svc, token, port))
+    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+    thread.start()
+    try:
+        r = httpx.get(
+            f"http://127.0.0.1:{port}/api/telegram/senders?instance=tg1",
+            headers={"X-Portal-Token": token},
+            timeout=5,
+        )
+        assert r.status_code == 200
+        assert r.json()["senders"][0]["username"] == "alice"
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+        svc.close()
+
+
+def test_index_has_recent_senders_control():
+    from coding_bridge.channels.portal_html import INDEX_HTML
+
+    for token in (
+        "function loadRecentSenders",
+        "function addTgSender",
+        "Load recent senders",
+        "/api/telegram/senders",
+    ):
+        assert token in INDEX_HTML
+

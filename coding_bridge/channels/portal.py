@@ -484,6 +484,73 @@ class PortalService:
             raise PortalError(502, "telegram rejected the bot token (check token_env/token_file)")
         raise PortalError(502, f"telegram getMe failed (code {code})")
 
+    def telegram_recent_senders(self, instance_id: str) -> list[dict[str, Any]]:
+        """Peek at recent inbound messages (getUpdates) and return distinct senders.
+
+        Lets an operator allowlist "the person who just messaged my bot" instead
+        of hunting for a numeric id. Uses ``timeout=0`` (no long-poll) and never
+        advances the offset — it only *reads*. It still can't run concurrently
+        with ``channels start`` (Telegram allows a single getUpdates consumer);
+        that surfaces as a 409, which we translate into a clear message. The
+        token stays in the URL path and is never logged.
+        """
+        inst = self._telegram_instance(instance_id)
+        try:
+            token = inst.resolve_token()
+        except ConfigError as exc:
+            raise PortalError(400, str(exc)) from None
+        url = f"{inst.api_base}/bot{token}/getUpdates"
+        try:
+            resp = self._client.request(
+                "POST", url, json={"timeout": 0, "limit": 100, "allowed_updates": ["message"]}
+            )
+        except httpx.HTTPError as exc:
+            raise PortalError(502, f"telegram unreachable: {exc.__class__.__name__}") from None
+        try:
+            body = resp.json()
+        except ValueError:
+            raise PortalError(502, "telegram returned non-JSON") from None
+        if not (isinstance(body, dict) and body.get("ok")):
+            code = body.get("error_code") if isinstance(body, dict) else resp.status_code
+            if code == 409:
+                raise PortalError(
+                    409,
+                    "Telegram is busy — stop `channels start` first to load recent "
+                    "senders, or add IDs by hand.",
+                )
+            if code == 401:
+                raise PortalError(
+                    502, "telegram rejected the bot token (check token_env/token_file)"
+                )
+            raise PortalError(502, f"telegram getUpdates failed (code {code})")
+        updates = body.get("result")
+        if not isinstance(updates, list):
+            return []
+        seen: dict[str, dict[str, Any]] = {}
+        for u in updates:
+            if not isinstance(u, dict):
+                continue
+            msg = u.get("message")
+            if not isinstance(msg, dict):
+                continue
+            frm = msg.get("from")
+            if not isinstance(frm, dict):
+                continue
+            uid = frm.get("id")
+            if not isinstance(uid, int):
+                continue
+            chat = msg.get("chat") if isinstance(msg.get("chat"), dict) else {}
+            uname = frm.get("username") if isinstance(frm.get("username"), str) else None
+            name = frm.get("first_name") or uname or str(uid)
+            seen[str(uid)] = {
+                "id": str(uid),
+                "username": uname,
+                "name": name if isinstance(name, str) else str(uid),
+                "chat_type": chat.get("type") if isinstance(chat.get("type"), str) else None,
+            }
+        # newest distinct sender first (updates arrive oldest→newest)
+        return list(reversed(list(seen.values())))
+
     def search_contacts(self, instance_id: str, query: str, limit: int) -> list[dict[str, Any]]:
         inst = self._instance(instance_id)
         contacts = self._contacts(inst)
@@ -779,6 +846,8 @@ def _make_handler(service: PortalService, token: str, port: int) -> type[BaseHTT
                     self._send_json(200, {"groups": service.groups(instance)})
                 elif path == "/api/telegram/status":
                     self._send_json(200, service.telegram_status(instance))
+                elif path == "/api/telegram/senders":
+                    self._send_json(200, {"senders": service.telegram_recent_senders(instance)})
                 elif path == "/api/wechat/contacts":
                     q = query.get("q", [""])[0]
                     try:

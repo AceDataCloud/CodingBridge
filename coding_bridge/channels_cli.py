@@ -23,6 +23,7 @@ import contextlib
 import logging
 import stat
 import sys
+import time
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -342,6 +343,41 @@ def cmd_channels_start(settings: Settings) -> int:
         # Shared across instances; only used by instances with require_approval.
         approval_store = ApprovalStore(settings.config_dir / "approvals")
 
+        # Run status + recent-turn ring the portal reads (content-free).
+        from .channels.observability import TurnEvent, set_turn_sink
+        from .channels.status import StatusStore
+
+        status_store = StatusStore(settings.config_dir / "status")
+        started_at = time.time()
+        channel_descs = [
+            {"adapter": "wechat", "instance_id": i.instance_id, "endpoint": i.base_url}
+            for i, _ in wechat_resolved
+        ] + [
+            {"adapter": "telegram", "instance_id": i.instance_id, "endpoint": i.api_base}
+            for i, _ in telegram_resolved
+        ]
+
+        def _record_turn(ev: TurnEvent) -> None:
+            status_store.record_turn(
+                {
+                    "ts": time.time(),
+                    "adapter": ev.adapter,
+                    "instance_id": ev.instance_id,
+                    "provider": ev.provider,
+                    "outcome": ev.outcome,
+                    "latency_ms": ev.latency_ms,
+                    "prompt_chars": ev.prompt_chars,
+                    "reply_chars": ev.reply_chars,
+                }
+            )
+
+        async def _heartbeat() -> None:
+            while not stop.is_set():
+                with contextlib.suppress(Exception):
+                    status_store.write_run(channel_descs, started_at=started_at)
+                with contextlib.suppress(asyncio.TimeoutError):
+                    await asyncio.wait_for(stop.wait(), timeout=20)
+
         def _make_dispatcher(inst: object) -> SessionDispatcher:
             return SessionDispatcher(
                 settings,
@@ -381,6 +417,10 @@ def cmd_channels_start(settings: Settings) -> int:
             runners.append(asyncio.create_task(tg_adapter.run()))
             print(f"channel started: telegram/{inst.instance_id} → {inst.api_base}")
 
+        set_turn_sink(_record_turn)
+        status_store.write_run(channel_descs, started_at=started_at)
+        hb_task = asyncio.create_task(_heartbeat())
+
         try:
             # Wait for any runner to exit (auth failure, etc.) or Ctrl-C.
             done, pending = await asyncio.wait(
@@ -391,6 +431,12 @@ def cmd_channels_start(settings: Settings) -> int:
                     logger.error("adapter exited: %s", t.exception().__class__.__name__)
         finally:
             stop.set()
+            set_turn_sink(None)
+            hb_task.cancel()
+            with contextlib.suppress(BaseException):
+                await hb_task
+            with contextlib.suppress(Exception):
+                status_store.clear_run()
             for a in adapters:
                 with contextlib.suppress(Exception):
                     await a.aclose()

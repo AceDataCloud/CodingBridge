@@ -32,6 +32,10 @@ def _capture(fn) -> tuple[int, str, str]:
     return rc, out.getvalue(), err.getvalue()
 
 
+def test_channels_cli_source_is_ascii_only() -> None:
+    assert Path(channels_cli.__file__).read_text(encoding="utf-8").isascii()
+
+
 # ---------- init --------------------------------------------------------------
 
 

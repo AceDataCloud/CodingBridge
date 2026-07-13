@@ -2,16 +2,16 @@
 
 Sub-subcommands:
 
-* ``coding-bridge channels init`` — write a skeleton ``channels.toml`` next to
+* ``coding-bridge channels init`` - write a skeleton ``channels.toml`` next to
   the credentials file (safe defaults: ``enabled=false``).
-* ``coding-bridge channels start`` — read ``channels.toml``, spin up one
-  ``PolicyGate → SessionDispatcher`` per enabled instance, and run the
+* ``coding-bridge channels start`` - read ``channels.toml``, spin up one
+    ``PolicyGate -> SessionDispatcher`` per enabled instance, and run the
   adapter loop until Ctrl-C.
-* ``coding-bridge channels doctor`` — validate ``channels.toml``, resolve
+* ``coding-bridge channels doctor`` - validate ``channels.toml``, resolve
   each token (without ever printing it), and ping each channel (WeChat gateway
   endpoint / Telegram ``getMe``).
 
-The dispatcher-wiring lives ONLY here — the `coding_bridge.channels.*`
+The dispatcher-wiring lives ONLY here - the `coding_bridge.channels.*`
 package stays pure library code that can be reused by other CLIs or by tests.
 """
 
@@ -46,7 +46,7 @@ logger = logging.getLogger("coding-bridge.channels.cli")
 
 _INIT_TEMPLATE = """\
 # coding-bridge channels config
-# Every instance is `enabled = false` by default — flip to true only when the
+# Every instance is `enabled = false` by default - flip to true only when the
 # token env var is set and the sender allowlist is filled in. See
 # https://github.com/AceDataCloud/CodingBridge for docs.
 
@@ -61,7 +61,7 @@ _INIT_TEMPLATE = """\
 # trigger_prefix = "/ask "
 #
 # # Only accept messages from these sender IDs (WeChat wxid). Empty list means
-# # allow all — safe only when the token is exclusively yours.
+# # allow all - safe only when the token is exclusively yours.
 # allowed_senders = []
 #
 # # At most this many messages per sender_id per 60 s. 0 disables the limit.
@@ -81,7 +81,7 @@ _INIT_TEMPLATE = """\
 # trigger_prefix = "/ask "
 #
 # # Only accept messages from these Telegram numeric user IDs (as strings).
-# # Empty list means allow all — safe only for a private bot. Message
+# # Empty list means allow all - safe only for a private bot. Message
 # # @userinfobot to find your own id.
 # allowed_senders = []
 #
@@ -103,7 +103,7 @@ def _write_secure_file(path: Path, body: str) -> None:
     Uses ``open(..., 'x')`` (exclusive create) so a concurrent second
     ``channels init`` can't race between our ``exists()`` check and our
     ``write_text()``. On POSIX, chmod 0600 so token references aren't
-    world-readable. On Windows, the file inherits the parent's ACL — since
+    world-readable. On Windows, the file inherits the parent's ACL - since
     the file only ever contains env-var *names* and file *paths*, not the
     tokens themselves, this is acceptable.
     """
@@ -149,11 +149,11 @@ async def _doctor_one(inst: WeChatInstanceConfig) -> tuple[bool, str]:
     Actually tests that the token is accepted by hitting an authenticated
     endpoint (``GET /api/tasks/<probe>``). The gateway's response:
 
-    * 401 → token rejected → FAIL (loudly, since this is the whole point of doctor)
-    * 404 → token accepted but probe id unknown → PASS (this is expected)
-    * 2xx → token accepted, endpoint returned a status → PASS
-    * 5xx / other → server broken → FAIL
-    * network error → unreachable → FAIL
+    * 401 -> token rejected -> FAIL (loudly, since this is the whole point of doctor)
+    * 404 -> token accepted but probe id unknown -> PASS (this is expected)
+    * 2xx -> token accepted, endpoint returned a status -> PASS
+    * 5xx / other -> server broken -> FAIL
+    * network error -> unreachable -> FAIL
 
     Falls back to ``/health`` if the tasks endpoint isn't implemented, but
     warns that auth wasn't verified.
@@ -172,7 +172,7 @@ async def _doctor_one(inst: WeChatInstanceConfig) -> tuple[bool, str]:
         probe = "coding-bridge-doctor-probe"
         try:
             await client.get_task_status(probe)
-            # 2xx means the probe id happened to exist (extremely unlikely) —
+            # 2xx means the probe id happened to exist (extremely unlikely) -
             # still counts as auth OK.
             return True, f"OK (token accepted, {token_len} bytes)"
         except httpx.HTTPStatusError as http_exc:
@@ -182,7 +182,7 @@ async def _doctor_one(inst: WeChatInstanceConfig) -> tuple[bool, str]:
             if code == 403:
                 return False, "token forbidden (403)"
             if code == 404:
-                # Token was fine — server just didn't have that task. This is
+                # Token was fine - server just didn't have that task. This is
                 # the happy path for a fresh install.
                 return True, f"OK (token accepted, {token_len} bytes)"
             if 500 <= code < 600:
@@ -209,8 +209,8 @@ async def _doctor_one(inst: WeChatInstanceConfig) -> tuple[bool, str]:
 async def _doctor_one_telegram(inst: TelegramInstanceConfig) -> tuple[bool, str]:
     """Return (ok, message) for one Telegram instance. Never logs the token.
 
-    Calls ``getMe`` — Telegram's canonical auth probe. 200 → token good (report
-    the bot's ``@username``); 401 → token rejected; anything else → unreachable
+    Calls ``getMe`` - Telegram's canonical auth probe. 200 -> token good (report
+    the bot's ``@username``); 401 -> token rejected; anything else -> unreachable
     or transient server error.
     """
     try:
@@ -306,7 +306,7 @@ def cmd_channels_start(settings: Settings) -> int:
     enabled_telegram = cfg.enabled_telegram
     if not enabled_wechat and not enabled_telegram:
         print(
-            "No enabled channels — set `enabled = true` on at least one "
+            "No enabled channels - set `enabled = true` on at least one "
             "[[channels.wechat]] or [[channels.telegram]] block in " + str(path),
             file=sys.stderr,
         )
@@ -401,7 +401,7 @@ def cmd_channels_start(settings: Settings) -> int:
             dispatchers.append(dispatcher)
             adapters.append(adapter)
             runners.append(asyncio.create_task(adapter.run()))
-            print(f"channel started: wechat/{inst.instance_id} → {inst.base_url}")
+            print(f"channel started: wechat/{inst.instance_id} -> {inst.base_url}")
 
         for inst, token in telegram_resolved:
             dispatcher = _make_dispatcher(inst)
@@ -416,7 +416,7 @@ def cmd_channels_start(settings: Settings) -> int:
             dispatchers.append(dispatcher)
             adapters.append(tg_adapter)
             runners.append(asyncio.create_task(tg_adapter.run()))
-            print(f"channel started: telegram/{inst.instance_id} → {inst.api_base}")
+            print(f"channel started: telegram/{inst.instance_id} -> {inst.api_base}")
 
         set_turn_sink(_record_turn)
         status_store.write_run(channel_descs, started_at=started_at)
@@ -464,7 +464,7 @@ def cmd_channels_start(settings: Settings) -> int:
 def cmd_channels_smoke(
     settings: Settings, *, provider: str, prompt: str, timeout: float
 ) -> int:
-    """Run one real provider turn locally — no channel, no gateway, no network.
+    """Run one real provider turn locally - no channel, no gateway, no network.
 
     This is the ``claude`` / ``codex`` end-to-end check an operator runs BEFORE
     going live: it drives the exact same ``SessionDispatcher`` turn machinery a
@@ -485,7 +485,7 @@ def cmd_channels_smoke(
     from .providers import KNOWN_PROVIDERS, default_provider_factory
 
     # Validate up front for parity with the channels.toml `default_provider`
-    # check — otherwise `--provider gpt4` would silently fall back to Claude and
+    # check - otherwise `--provider gpt4` would silently fall back to Claude and
     # the operator would think they'd smoke-tested codex.
     if provider not in KNOWN_PROVIDERS:
         allowed = ", ".join(KNOWN_PROVIDERS)
@@ -498,7 +498,7 @@ def cmd_channels_smoke(
         name = "smoke"
         instance_id = "local"
 
-        def set_handler(self, _h) -> None:  # not used — we call the dispatcher directly
+        def set_handler(self, _h) -> None:  # not used - we call the dispatcher directly
             return
 
         async def run(self) -> None:
@@ -546,14 +546,14 @@ def cmd_channels_smoke(
 
     reply = captured.get("reply")
     if not reply:
-        print("✗ no reply (provider timed out or produced nothing)", file=sys.stderr)
+        print("[FAIL] no reply (provider timed out or produced nothing)", file=sys.stderr)
         return 1
     print("--- reply ---")
     print(reply)
     print("-------------")
     # The dispatcher synthesises these sentinel strings for the failure paths
     # (see SessionDispatcher._run_turn). A smoke run that lands on any of them
-    # must exit non-zero — a timed-out or errored provider is NOT a healthy
+    # must exit non-zero - a timed-out or errored provider is NOT a healthy
     # setup even though it technically produced "a reply".
     failure_markers = ("(provider error:", "(provider timed out")
     if reply == "(no reply)" or reply.startswith(failure_markers):
@@ -579,7 +579,7 @@ def cmd_channels_portal(
 def cmd_channels_install_service(settings: Settings, *, force: bool) -> int:
     """Write a user-scoped OS service that runs `channels start` at login/boot.
 
-    Generates the unit file only + prints the single command that enables it —
+    Generates the unit file only + prints the single command that enables it -
     it never enables/starts the service or touches anything system-wide itself.
     """
     import platform as _platform
@@ -608,7 +608,7 @@ def cmd_channels_install_service(settings: Settings, *, force: bool) -> int:
     except OSError as exc:
         print(f"could not write {plan.path}: {exc.__class__.__name__}", file=sys.stderr)
         return 1
-    print(f"Wrote {plan.kind} unit → {plan.path}")
+    print(f"Wrote {plan.kind} unit -> {plan.path}")
     print("\nActivate it (starts `coding-bridge channels start` in the background):")
     for cmd in plan.activate:
         print(f"  {cmd}")

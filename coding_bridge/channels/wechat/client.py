@@ -133,7 +133,7 @@ class WeChatClient:
             raise ValueError("task_id contains invalid characters")
         # Belt-and-suspenders: `quote(safe="")` still produces a plain
         # segment since the regex already rejects unsafe input.
-        path = f"/api/messages/tasks/{quote(task_id, safe='')}"
+        path = f"/api/tasks/{quote(task_id, safe='')}"
         resp = await self._client.get(path)
         resp.raise_for_status()
         try:

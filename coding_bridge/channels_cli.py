@@ -261,10 +261,10 @@ def cmd_channels_doctor(settings: Settings) -> int:
             state = "ENABLED" if inst.enabled else "disabled"
             print(f"[{state}] wechat/{inst.instance_id}: {inst.base_url}")
             if not inst.enabled:
-                print("  → skipped (enabled=false)")
+                print("  -> skipped (enabled=false)")
                 continue
             ok, msg = await _doctor_one(inst)
-            marker = "✓" if ok else "✗"
+            marker = "[OK]" if ok else "[FAIL]"
             print(f"  {marker} {msg}")
             if not ok:
                 all_ok = False
@@ -272,10 +272,10 @@ def cmd_channels_doctor(settings: Settings) -> int:
             state = "ENABLED" if tg.enabled else "disabled"
             print(f"[{state}] telegram/{tg.instance_id}: {tg.api_base}")
             if not tg.enabled:
-                print("  → skipped (enabled=false)")
+                print("  -> skipped (enabled=false)")
                 continue
             ok, msg = await _doctor_one_telegram(tg)
-            marker = "✓" if ok else "✗"
+            marker = "[OK]" if ok else "[FAIL]"
             print(f"  {marker} {msg}")
             if not ok:
                 all_ok = False

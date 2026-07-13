@@ -145,7 +145,8 @@ class TestChannelsDoctor:
         rc, out, err = _capture(lambda: channels_cli.cmd_channels_doctor(s))
         assert rc == 0
         assert "live" in out
-        assert "OK" in out
+        assert "[OK]" in out
+        out.encode("cp936")
         # Token value never appears in output
         assert "abc" not in out
         assert "abc" not in err
@@ -181,7 +182,9 @@ class TestChannelsDoctor:
         rc, out, err = _capture(lambda: channels_cli.cmd_channels_doctor(s))
         assert rc == 1
         assert "rejected" in out
+        assert "[FAIL]" in out
         assert "401" in out
+        out.encode("cp936")
         # Token never leaked
         assert "wrong" not in out
 

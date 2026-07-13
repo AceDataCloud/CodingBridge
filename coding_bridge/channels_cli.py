@@ -147,7 +147,7 @@ async def _doctor_one(inst: WeChatInstanceConfig) -> tuple[bool, str]:
     """Return (ok, message) for one instance. Never raises; never logs secrets.
 
     Actually tests that the token is accepted by hitting an authenticated
-    endpoint (``GET /api/messages/tasks/<probe>``). The gateway's response:
+    endpoint (``GET /api/tasks/<probe>``). The gateway's response:
 
     * 401 → token rejected → FAIL (loudly, since this is the whole point of doctor)
     * 404 → token accepted but probe id unknown → PASS (this is expected)
@@ -193,7 +193,7 @@ async def _doctor_one(inst: WeChatInstanceConfig) -> tuple[bool, str]:
                     resp = await client._client.get("/health")  # noqa: SLF001
                     if 200 <= resp.status_code < 300:
                         return False, (
-                            f"reachable at /health but /api/messages/tasks "
+                            f"reachable at /health but /api/tasks "
                             f"returned {code} (gateway may be misconfigured)"
                         )
                 except Exception:  # noqa: BLE001

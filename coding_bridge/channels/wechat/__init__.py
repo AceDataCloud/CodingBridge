@@ -10,9 +10,8 @@ on a CVM) with two edges:
   and hands anything left to the dispatcher — policy (trigger prefix,
   allowlist, rate limit) lives one layer up in P7.
 * ``POST /api/messages/send`` with ``Authorization: Bearer <TOKEN>`` — returns
-  ``202 Accepted`` because the gateway queues a background UI task. P2 fires and
-  forgets; P7 will poll ``/api/messages/tasks/{id}`` for delivery
-  confirmation.
+  ``202 Accepted`` because the gateway queues a background UI task. Delivery
+  diagnostics use ``GET /api/tasks/{id}``.
 
 The adapter is import-safe without extras — it delegates to :mod:`websockets`
 and :mod:`httpx`, both already required by CodingBridge core. The

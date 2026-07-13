@@ -62,6 +62,20 @@ pipx install coding-bridge      # recommended
 pip install coding-bridge
 ```
 
+On Windows, if `pipx` is not installed, use the Python launcher directly:
+
+```powershell
+py -m pip install --user --upgrade coding-bridge
+```
+
+If `pip` reports an old `0.1.0` editable install or `coding_bridge` cannot be
+imported, remove the stale install before upgrading:
+
+```powershell
+py -m pip uninstall -y coding-bridge
+py -m pip install --user --no-cache-dir "coding-bridge[wechat]"
+```
+
 For the ASCII-QR pairing helper, install the optional extra:
 
 ```bash
@@ -159,6 +173,18 @@ or a secrets-file path (`token_file`). Export it before starting:
 
 ```bash
 export WECHAT_TOKEN_MY_WECHAT="…"
+```
+
+Windows PowerShell:
+
+```powershell
+$env:WECHAT_TOKEN_MY_WECHAT = "…"
+```
+
+Windows Command Prompt:
+
+```bat
+set "WECHAT_TOKEN_MY_WECHAT=…"
 ```
 
 #### Provider sign-in

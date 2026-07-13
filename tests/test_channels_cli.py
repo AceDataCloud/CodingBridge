@@ -59,9 +59,7 @@ class TestChannelsInit:
         # Original file untouched
         assert s.channels_config_path.read_text(encoding="utf-8") == "# already here"
 
-    @pytest.mark.skipif(
-        os.name == "nt", reason="POSIX permission bits don't apply on Windows"
-    )
+    @pytest.mark.skipif(os.name == "nt", reason="POSIX permission bits don't apply on Windows")
     def test_posix_permissions_are_0600(self, tmp_path: Path) -> None:
         import stat as _stat
 
@@ -134,7 +132,7 @@ class TestChannelsDoctor:
 
         def patched_init(self, base_url, token, *, timeout=10.0, transport=None):
             def handler(request: httpx.Request) -> httpx.Response:
-                assert request.url.path.startswith("/api/messages/tasks/")
+                assert request.url.path.startswith("/api/tasks/")
                 # Token was accepted; the probe task just doesn't exist.
                 return httpx.Response(404, json={"error": "task not found"})
 
@@ -171,6 +169,7 @@ class TestChannelsDoctor:
 
         def patched_init(self, base_url, token, *, timeout=10.0, transport=None):
             def handler(request: httpx.Request) -> httpx.Response:
+                assert request.url.path.startswith("/api/tasks/")
                 return httpx.Response(401, json={"error": "unauthorized"})
 
             original_init(
@@ -352,9 +351,7 @@ class TestChannelsSmoke:
         _install_stub_factory(monkeypatch, script)
         s = _settings(tmp_path)
         rc, out, err = _capture(
-            lambda: channels_cli.cmd_channels_smoke(
-                s, provider="claude", prompt="x", timeout=5.0
-            )
+            lambda: channels_cli.cmd_channels_smoke(s, provider="claude", prompt="x", timeout=5.0)
         )
         assert rc == 1
         assert "kaboom" in out
@@ -369,9 +366,7 @@ class TestChannelsSmoke:
         _install_stub_factory(monkeypatch, script)
         s = _settings(tmp_path)
         rc, out, err = _capture(
-            lambda: channels_cli.cmd_channels_smoke(
-                s, provider="claude", prompt="x", timeout=5.0
-            )
+            lambda: channels_cli.cmd_channels_smoke(s, provider="claude", prompt="x", timeout=5.0)
         )
         assert rc == 1
 
@@ -387,9 +382,7 @@ class TestChannelsSmoke:
         _install_stub_factory(monkeypatch, script)
         s = _settings(tmp_path)
         rc, out, err = _capture(
-            lambda: channels_cli.cmd_channels_smoke(
-                s, provider="claude", prompt="x", timeout=0.2
-            )
+            lambda: channels_cli.cmd_channels_smoke(s, provider="claude", prompt="x", timeout=0.2)
         )
         assert rc == 1
         assert "timed out" in out
@@ -399,9 +392,7 @@ class TestChannelsSmoke:
         # --provider must fail loudly (rc=2), not silently fall back to Claude.
         s = _settings(tmp_path)
         rc, out, err = _capture(
-            lambda: channels_cli.cmd_channels_smoke(
-                s, provider="gpt4", prompt="x", timeout=5.0
-            )
+            lambda: channels_cli.cmd_channels_smoke(s, provider="gpt4", prompt="x", timeout=5.0)
         )
         assert rc == 2
         assert "unknown provider" in err

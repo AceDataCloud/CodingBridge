@@ -5,4 +5,9 @@ drives local Claude Code sessions on behalf of an authenticated browser. All
 code execution stays local; the bridge only relays messages.
 """
 
-__version__ = "0.1.0"
+from importlib.metadata import PackageNotFoundError, version
+
+try:
+    __version__ = version("coding-bridge")
+except PackageNotFoundError:
+    __version__ = "0+unknown"

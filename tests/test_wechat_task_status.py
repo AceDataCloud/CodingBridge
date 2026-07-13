@@ -11,7 +11,7 @@ from coding_bridge.channels.wechat import WeChatClient
 @pytest.mark.asyncio
 async def test_get_task_status_returns_json_dict() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
-        assert request.url.path == "/api/messages/tasks/task-42"
+        assert request.url.path == "/api/tasks/task-42"
         assert request.headers.get("authorization") == "Bearer tok"
         return httpx.Response(200, json={"status": "delivered", "task_id": "task-42"})
 
@@ -46,9 +46,7 @@ async def test_get_task_status_rejects_query_injection() -> None:
         seen.append(str(request.url))
         return httpx.Response(200, json={})
 
-    client = WeChatClient(
-        "http://wechat.local", "tok", transport=httpx.MockTransport(handler)
-    )
+    client = WeChatClient("http://wechat.local", "tok", transport=httpx.MockTransport(handler))
     try:
         for bad in [
             "42?admin=1",
@@ -71,13 +69,11 @@ async def test_get_task_status_rejects_query_injection() -> None:
 async def test_get_task_status_accepts_safe_uuid_shaped_id() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         # Ensure the path was NOT tampered with
-        assert request.url.path == "/api/messages/tasks/abc-DEF_123"
+        assert request.url.path == "/api/tasks/abc-DEF_123"
         assert request.url.query == b""
         return httpx.Response(200, json={"status": "ok"})
 
-    client = WeChatClient(
-        "http://wechat.local", "tok", transport=httpx.MockTransport(handler)
-    )
+    client = WeChatClient("http://wechat.local", "tok", transport=httpx.MockTransport(handler))
     try:
         assert await client.get_task_status("abc-DEF_123") == {"status": "ok"}
     finally:

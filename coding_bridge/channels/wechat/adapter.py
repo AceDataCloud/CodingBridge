@@ -25,6 +25,9 @@ import contextlib
 import json
 import logging
 import re
+import time
+from collections import deque
+from datetime import datetime
 from typing import Any
 from urllib.parse import urlparse, urlunparse
 
@@ -37,6 +40,8 @@ logger = logging.getLogger("coding-bridge.channels.wechat")
 
 _INITIAL_BACKOFF_S = 0.5
 _MAX_BACKOFF_S = 30.0
+_POLL_INTERVAL_S = 1.0
+_MESSAGE_SEEN_MAX = 5000
 _HTTP_TO_WS = {"http": "ws", "https": "wss"}
 # Any query-string token or password segment is redacted before logging.
 _TOKEN_QS_RE = re.compile(r"([?&](?:token|api_token|password)=)([^&]+)", re.IGNORECASE)
@@ -78,19 +83,67 @@ def _parse_incoming(payload: dict[str, Any]) -> IncomingMessage | None:
     if not isinstance(target, str) or not target:
         return None
 
+    message_id = data.get("msg_id") if isinstance(data.get("msg_id"), str) else None
+    upstream_id = f"{target}:{message_id}" if message_id else None
     return IncomingMessage(
         sender_id=str(data.get("sender_id") or target),
         sender_name=data.get("sender_name") if isinstance(data.get("sender_name"), str) else None,
         target=ChannelTarget(
             conversation_id=target,
             conversation_type=str(data.get("conversation_type") or "private"),
-            reply_to_id=data.get("msg_id") if isinstance(data.get("msg_id"), str) else None,
+            reply_to_id=message_id,
         ),
         text=text,
         msg_type=str(data.get("msg_type") or "text"),
         direction=direction,
-        upstream_id=data.get("msg_id") if isinstance(data.get("msg_id"), str) else None,
+        upstream_id=upstream_id,
         received_at_ms=int(data["timestamp"]) if isinstance(data.get("timestamp"), int) else None,
+        raw=dict(data),
+    )
+
+
+def _parse_polled_message(
+    data: dict[str, Any],
+    targets: dict[str, tuple[str, str]],
+) -> IncomingMessage | None:
+    if data.get("direction") != "inbound":
+        return None
+    text = data.get("text")
+    if not isinstance(text, str) or not text:
+        return None
+    conversation_id = data.get("conversation_id")
+    if not isinstance(conversation_id, str) or not conversation_id:
+        return None
+    mapped_target = targets.get(conversation_id)
+    if mapped_target is None:
+        return None
+    target_name = data.get("conversation_name")
+    if not isinstance(target_name, str) or not target_name:
+        target_name = mapped_target[0]
+    message_id = str(data.get("id") or "")
+    if not message_id:
+        return None
+    sent_at = data.get("sent_at") if isinstance(data.get("sent_at"), str) else ""
+    upstream_id = f"{conversation_id}:{message_id}"
+    received_at_ms = None
+    if sent_at:
+        with contextlib.suppress(ValueError):
+            timestamp = datetime.fromisoformat(sent_at.replace("Z", "+00:00")).timestamp()
+            received_at_ms = int(timestamp * 1000)
+    conversation_type = mapped_target[1]
+    return IncomingMessage(
+        sender_id=str(data.get("sender_id") or conversation_id),
+        sender_name=data.get("sender_name") if isinstance(data.get("sender_name"), str) else None,
+        target=ChannelTarget(
+            conversation_id=conversation_id,
+            conversation_type=conversation_type,
+            extra={"send_target": target_name},
+        ),
+        text=text,
+        msg_type=str(data.get("type") or "text"),
+        direction="inbound",
+        upstream_id=upstream_id,
+        received_at_ms=received_at_ms,
         raw=dict(data),
     )
 
@@ -115,6 +168,7 @@ class WeChatAdapter:
         client: WeChatClient | None = None,
         ws_connect: Any | None = None,
         stop_event: asyncio.Event | None = None,
+        poll_interval: float = _POLL_INTERVAL_S,
     ) -> None:
         if not instance_id:
             raise ValueError("instance_id must be a non-empty string")
@@ -132,6 +186,9 @@ class WeChatAdapter:
         self._stop = stop_event or asyncio.Event()
         self._handler: MessageHandler | None = None
         self._owns_client = client is None
+        self._poll_interval = poll_interval
+        self._seen_order: deque[str] = deque()
+        self._seen: set[str] = set()
         # Held for the lifetime of one WS session so ``aclose()`` can force
         # the receive loop to unblock without waiting for a gateway heartbeat.
         self._active_ws: Any | None = None
@@ -142,6 +199,18 @@ class WeChatAdapter:
     async def run(self) -> None:
         if self._handler is None:
             raise RuntimeError("WeChatAdapter.run() called before set_handler()")
+        poll_task = asyncio.create_task(
+            self._poll_loop(),
+            name=f"wechat-poll-{self.instance_id}",
+        )
+        try:
+            await self._run_ws()
+        finally:
+            poll_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await poll_task
+
+    async def _run_ws(self) -> None:
         ws_url = _build_ws_url(self._base_url, self._token)
         backoff = _INITIAL_BACKOFF_S
         while not self._stop.is_set():
@@ -178,6 +247,94 @@ class WeChatAdapter:
                     pass
                 backoff = min(backoff * 2, _MAX_BACKOFF_S)
 
+    async def _poll_loop(self) -> None:
+        cursor = int(time.time()) - 1
+        delay = self._poll_interval
+        while not self._stop.is_set():
+            try:
+                await asyncio.wait_for(self._stop.wait(), timeout=delay)
+                return
+            except asyncio.TimeoutError:
+                pass
+
+            try:
+                rows = await self._client.poll_messages(cursor, limit=500)
+                if not rows:
+                    delay = self._poll_interval
+                    continue
+                newest = cursor
+                for row in rows:
+                    sent_at = row.get("sent_at")
+                    if isinstance(sent_at, str):
+                        with contextlib.suppress(ValueError):
+                            newest = max(
+                                newest,
+                                int(
+                                    datetime.fromisoformat(
+                                        sent_at.replace("Z", "+00:00")
+                                    ).timestamp()
+                                ),
+                            )
+                unseen_rows = [
+                    row
+                    for row in rows
+                    if (
+                        row.get("conversation_id")
+                        and row.get("id") is not None
+                        and f"{row['conversation_id']}:{row['id']}" not in self._seen
+                    )
+                ]
+                conversations = await self._client.list_conversations() if unseen_rows else []
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.warning(
+                    "wechat: poll error instance=%s err=%s.%s",
+                    self.instance_id,
+                    exc.__class__.__module__,
+                    exc.__class__.__name__,
+                )
+                delay = min(max(delay * 2, self._poll_interval), _MAX_BACKOFF_S)
+                continue
+
+            delay = self._poll_interval
+
+            targets = {
+                str(item["id"]): (str(item["name"]), str(item.get("type") or "private"))
+                for item in conversations
+                if item.get("id") and item.get("name")
+            }
+            parsed: list[IncomingMessage] = []
+            for row in unseen_rows:
+                message = _parse_polled_message(row, targets)
+                if message is not None:
+                    parsed.append(message)
+
+            parsed.sort(key=lambda item: item.received_at_ms or 0)
+            for message in parsed:
+                await self._dispatch(message, source="poll")
+
+            cursor = max(cursor, min(newest, int(time.time()) - 1))
+
+    async def _dispatch(self, message: IncomingMessage, *, source: str) -> None:
+        identity = message.upstream_id
+        if identity and identity in self._seen:
+            return
+        if identity:
+            self._seen.add(identity)
+            self._seen_order.append(identity)
+            while len(self._seen_order) > _MESSAGE_SEEN_MAX:
+                self._seen.discard(self._seen_order.popleft())
+        assert self._handler is not None
+        try:
+            await self._handler(message, self)
+        except Exception:
+            logger.exception(
+                "wechat: %s handler error instance=%s",
+                source,
+                self.instance_id,
+            )
+
     async def _consume(self, ws: Any) -> None:
         async for raw in ws:
             if self._stop.is_set():
@@ -192,14 +349,7 @@ class WeChatAdapter:
             msg = _parse_incoming(payload)
             if msg is None:
                 continue
-            assert self._handler is not None  # invariant checked in run()
-            try:
-                await self._handler(msg, self)
-            except Exception:
-                # A single handler failure must not kill the receive loop —
-                # the dispatcher already logs its own errors, and abusive
-                # senders shouldn't be able to DoS the adapter.
-                logger.exception("wechat: handler error instance=%s", self.instance_id)
+            await self._dispatch(msg, source="WS")
 
     async def send(
         self, target: ChannelTarget, text: str, *, reply_to: str | None = None

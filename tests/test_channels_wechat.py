@@ -13,7 +13,12 @@ import pytest
 
 from coding_bridge.channels import ChannelTarget, IncomingMessage, SendResult
 from coding_bridge.channels.wechat import WeChatAdapter, WeChatClient
-from coding_bridge.channels.wechat.adapter import _build_ws_url, _parse_incoming, _redact_url
+from coding_bridge.channels.wechat.adapter import (
+    _build_ws_url,
+    _parse_incoming,
+    _parse_polled_message,
+    _redact_url,
+)
 
 # ---------------------------------------------------------------------------
 # Pure helpers: no network
@@ -72,7 +77,7 @@ def test_parse_incoming_happy_path_private() -> None:
     assert msg.target.conversation_type == "private"
     assert msg.target.reply_to_id == "m1"
     assert msg.text == "/ask hi"
-    assert msg.upstream_id == "m1"
+    assert msg.upstream_id == "wxid_alice:m1"
 
 
 def test_parse_incoming_falls_back_to_target_when_no_sender_id() -> None:
@@ -140,6 +145,27 @@ async def test_wechat_client_send_202_returns_ok_with_upstream_id(respx_mock):
 
 
 @pytest.mark.asyncio
+async def test_wechat_client_uses_polled_display_name_only_for_outbound_send(respx_mock):
+    route = respx_mock.post("http://host/api/messages/send").mock(
+        return_value=httpx.Response(202, json={"task_id": "t-2"})
+    )
+    client = WeChatClient("http://host", "tok")
+    target = ChannelTarget(
+        conversation_id="Msg_private_1",
+        conversation_type="private",
+        extra={"send_target": "Alice"},
+    )
+    try:
+        result = await client.send_message(target, "hi")
+    finally:
+        await client.aclose()
+
+    assert result.ok is True
+    sent = json.loads(route.calls[0].request.content.decode())
+    assert sent["target"] == "Alice"
+
+
+@pytest.mark.asyncio
 async def test_wechat_client_send_500_returns_error_and_never_leaks_token(respx_mock):
     respx_mock.post("http://host/api/messages/send").mock(
         return_value=httpx.Response(500, json={"error": "boom"})
@@ -170,6 +196,85 @@ async def test_wechat_client_send_transport_error_returns_non_raising_result(res
 
     assert r.ok is False
     assert "ConnectError" in (r.error or "")
+
+
+@pytest.mark.asyncio
+async def test_wechat_client_polls_messages_with_authenticated_cursor(respx_mock):
+    route = respx_mock.get("http://host/api/messages/poll").mock(
+        return_value=httpx.Response(200, json=[{"id": "1", "text": "hello"}])
+    )
+    client = WeChatClient("http://host", "tok")
+    try:
+        rows = await client.poll_messages(123, limit=25)
+    finally:
+        await client.aclose()
+
+    assert rows == [{"id": "1", "text": "hello"}]
+    request = route.calls[0].request
+    assert request.url.params["since"] == "123"
+    assert request.url.params["limit"] == "25"
+    assert request.headers["authorization"] == "Bearer tok"
+    assert request.extensions["timeout"]["read"] == 30.0
+
+
+@pytest.mark.asyncio
+async def test_wechat_client_lists_conversation_targets(respx_mock):
+    route = respx_mock.get("http://host/api/conversations").mock(
+        side_effect=[
+            httpx.Response(
+                200,
+                json={
+                    "total": 1,
+                    "conversations": [
+                        {"id": f"Msg_{index}", "name": f"User {index}", "type": "private"}
+                        for index in range(200)
+                    ],
+                },
+            ),
+            httpx.Response(
+                200,
+                json={
+                    "total": 1,
+                    "conversations": [{"id": "Msg_200", "name": "Team", "type": "group"}],
+                },
+            ),
+        ]
+    )
+    client = WeChatClient("http://host", "tok")
+    try:
+        rows = await client.list_conversations()
+    finally:
+        await client.aclose()
+
+    assert len(rows) == 201
+    assert rows[-1] == {"id": "Msg_200", "name": "Team", "type": "group"}
+    assert route.call_count == 2
+    assert route.calls[1].request.url.params["offset"] == "200"
+
+
+@pytest.mark.asyncio
+async def test_wechat_client_stops_at_wisdom_maximum_offset(respx_mock):
+    page = [
+        {"id": f"Msg_{index}", "name": f"User {index}", "type": "private"} for index in range(200)
+    ]
+    route = respx_mock.get("http://host/api/conversations").mock(
+        return_value=httpx.Response(200, json={"total": 1, "conversations": page})
+    )
+    client = WeChatClient("http://host", "tok")
+    try:
+        rows = await client.list_conversations()
+    finally:
+        await client.aclose()
+
+    assert len(rows) == 1200
+    assert [call.request.url.params["offset"] for call in route.calls] == [
+        "0",
+        "200",
+        "400",
+        "600",
+        "800",
+        "1000",
+    ]
 
 
 @pytest.mark.asyncio
@@ -234,7 +339,11 @@ def _fake_connect(frames: list[str], stop: asyncio.Event):
     return _factory
 
 
-def _valid_frame(text: str = "/ask hi", target: str = "wxid_a") -> str:
+def _valid_frame(
+    text: str = "/ask hi",
+    target: str = "wxid_a",
+    message_id: str = "m1",
+) -> str:
     return json.dumps(
         {
             "event": "message.new",
@@ -246,7 +355,7 @@ def _valid_frame(text: str = "/ask hi", target: str = "wxid_a") -> str:
                 "sender_id": target,
                 "target": target,
                 "text": text,
-                "msg_id": "m1",
+                "msg_id": message_id,
             },
         }
     )
@@ -281,6 +390,154 @@ async def test_adapter_dispatches_valid_frame_to_handler():
     assert len(seen) == 1
     assert seen[0].text == "ping"
     assert seen[0].sender_id == "wxid_a"
+
+
+@pytest.mark.asyncio
+async def test_adapter_polls_when_wisdom_websocket_is_silent():
+    seen: list[IncomingMessage] = []
+
+    async def handler(msg: IncomingMessage, _adapter) -> None:
+        seen.append(msg)
+        stop.set()
+
+    class _PollingClient:
+        async def poll_messages(self, since: int, *, limit: int = 100):
+            return [
+                {
+                    "id": "1",
+                    "conversation_id": "Msg_private_1",
+                    "sender_id": None,
+                    "sender_name": None,
+                    "direction": "inbound",
+                    "type": "text",
+                    "text": "hello",
+                    "sent_at": "2026-07-21T07:24:55Z",
+                }
+            ]
+
+        async def list_conversations(self):
+            return [
+                {
+                    "id": "Msg_private_1",
+                    "name": "Alice",
+                    "type": "private",
+                }
+            ]
+
+        async def send_message(self, target, text, *, reply_to=None):
+            return SendResult(ok=True)
+
+        async def aclose(self) -> None:
+            return
+
+    stop = asyncio.Event()
+    adapter = WeChatAdapter(
+        instance_id="wisdom",
+        base_url="https://wisdom.example",
+        token="tok",
+        client=_PollingClient(),
+        ws_connect=_fake_connect([], stop),
+        stop_event=stop,
+        poll_interval=0.01,
+    )
+    adapter.set_handler(handler)
+
+    await asyncio.wait_for(adapter.run(), timeout=1.0)
+    await adapter.aclose()
+
+    assert len(seen) == 1
+    assert seen[0].text == "hello"
+    assert seen[0].sender_id == "Msg_private_1"
+    assert seen[0].target.conversation_id == "Msg_private_1"
+    assert seen[0].target.conversation_type == "private"
+    assert seen[0].target.extra["send_target"] == "Alice"
+    assert seen[0].upstream_id == "Msg_private_1:1"
+
+
+def test_ws_and_poll_messages_share_canonical_identity():
+    ws_message = _parse_incoming(json.loads(_valid_frame(target="Msg_private_1")))
+    poll_message = _parse_polled_message(
+        {
+            "id": "m1",
+            "conversation_id": "Msg_private_1",
+            "direction": "inbound",
+            "type": "text",
+            "text": "hello",
+            "sent_at": "2026-07-21T07:24:55Z",
+        },
+        {"Msg_private_1": ("Alice", "private")},
+    )
+
+    assert ws_message is not None
+    assert poll_message is not None
+    assert ws_message.upstream_id == poll_message.upstream_id == "Msg_private_1:m1"
+
+
+def test_polled_message_without_authoritative_conversation_type_is_dropped():
+    message = _parse_polled_message(
+        {
+            "id": "m1",
+            "conversation_id": "Msg_unknown",
+            "conversation_name": "Unknown chat",
+            "direction": "inbound",
+            "type": "text",
+            "text": "hello",
+        },
+        {},
+    )
+
+    assert message is None
+
+
+@pytest.mark.asyncio
+async def test_poll_cursor_overlaps_start_and_advances_for_ws_seen_rows(monkeypatch):
+    poll_cursors: list[int] = []
+    now = 1_000
+
+    class _PollingClient:
+        async def poll_messages(self, since: int, *, limit: int = 100):
+            poll_cursors.append(since)
+            if len(poll_cursors) == 1:
+                return [
+                    {
+                        "id": "m1",
+                        "conversation_id": "Msg_1",
+                        "direction": "inbound",
+                        "type": "text",
+                        "text": "already seen",
+                        "sent_at": "1970-01-01T00:16:40Z",
+                    }
+                ]
+            stop.set()
+            return []
+
+        async def list_conversations(self):
+            raise AssertionError("seen rows must not reload conversations")
+
+        async def send_message(self, target, text, *, reply_to=None):
+            return SendResult(ok=True)
+
+        async def aclose(self) -> None:
+            return
+
+    monkeypatch.setattr("coding_bridge.channels.wechat.adapter.time.time", lambda: now)
+    stop = asyncio.Event()
+    adapter = WeChatAdapter(
+        instance_id="wisdom",
+        base_url="https://wisdom.example",
+        token="tok",
+        client=_PollingClient(),
+        ws_connect=_fake_connect([], stop),
+        stop_event=stop,
+        poll_interval=0.01,
+    )
+    adapter._seen.add("Msg_1:m1")
+    adapter.set_handler(lambda *_args: None)
+
+    await asyncio.wait_for(adapter.run(), timeout=1.0)
+    await adapter.aclose()
+
+    assert poll_cursors == [now - 1, now - 1]
 
 
 @pytest.mark.asyncio
@@ -332,7 +589,10 @@ async def test_adapter_handler_exception_does_not_kill_loop():
         call_count += 1
         raise RuntimeError("handler exploded")
 
-    frames = [_valid_frame(text="one"), _valid_frame(text="two")]
+    frames = [
+        _valid_frame(text="one", message_id="m1"),
+        _valid_frame(text="two", message_id="m2"),
+    ]
     stop = asyncio.Event()
     adapter = WeChatAdapter(
         instance_id="cvm-bj",

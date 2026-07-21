@@ -20,6 +20,7 @@ from ..base import ChannelTarget, SendResult
 # is treated as a delivery failure — the adapter surfaces the payload verbatim
 # to the caller so operators have real diagnostics in the log.
 _ACCEPTED_STATUSES = frozenset({200, 201, 202})
+_POLL_READ_TIMEOUT_S = 30.0
 
 # Safe pattern for a gateway task id. The gateway generates UUID-like tokens; we
 # refuse anything with URL metacharacters so a caller can't inject a query
@@ -63,8 +64,9 @@ class WeChatClient:
     async def send_message(
         self, target: ChannelTarget, text: str, *, reply_to: str | None = None
     ) -> SendResult:
+        send_target = target.extra.get("send_target")
         payload: dict[str, Any] = {
-            "target": target.conversation_id,
+            "target": send_target if isinstance(send_target, str) else target.conversation_id,
             "text": text,
         }
         if target.conversation_type:
@@ -111,6 +113,39 @@ class WeChatClient:
             error=f"HTTP {resp.status_code}: {(err or '')[:200]}",
             latency_ms=latency_ms,
         )
+
+    async def poll_messages(self, since: int, *, limit: int = 100) -> list[dict[str, Any]]:
+        """Return messages newer than a Unix timestamp from Wisdom's WAL reader."""
+        resp = await self._client.get(
+            "/api/messages/poll",
+            params={"since": since, "limit": limit},
+            timeout=_POLL_READ_TIMEOUT_S,
+        )
+        resp.raise_for_status()
+        body = resp.json()
+        if not isinstance(body, list):
+            return []
+        return [item for item in body if isinstance(item, dict)]
+
+    async def list_conversations(self) -> list[dict[str, Any]]:
+        """Return conversation ids, names, and types used to address replies."""
+        conversations: list[dict[str, Any]] = []
+        offset = 0
+        while True:
+            resp = await self._client.get(
+                "/api/conversations",
+                params={"limit": 200, "offset": offset},
+                timeout=_POLL_READ_TIMEOUT_S,
+            )
+            resp.raise_for_status()
+            body = resp.json()
+            if not isinstance(body, dict) or not isinstance(body.get("conversations"), list):
+                return conversations
+            page = [item for item in body["conversations"] if isinstance(item, dict)]
+            conversations.extend(page)
+            if len(page) < 200 or offset >= 1000:
+                return conversations
+            offset += len(page)
 
     async def get_task_status(self, task_id: str) -> dict[str, Any]:
         """Fetch delivery status for a task returned by ``send_message``.

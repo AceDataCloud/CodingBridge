@@ -164,7 +164,11 @@ async def _doctor_one(inst: WeChatInstanceConfig) -> tuple[bool, str]:
         return False, f"token: {exc}"
 
     token_len = len(token)  # only the length is safe to display
-    client = WeChatClient(inst.base_url, token, timeout=5.0)
+    # 15s, not 5s: a cold TLS handshake to a hosted gateway (e.g.
+    # *.wisdom.acedata.cloud) can take ~6-7s on the first connect, which a
+    # 5s timeout would mis-report as an unreachable ConnectTimeout even though
+    # `channels start` connects fine.
+    client = WeChatClient(inst.base_url, token, timeout=15.0)
     try:
         # Probe id is a syntactically valid but almost-certainly-unknown token.
         # It uses only characters allowed by _TASK_ID_RE so `get_task_status`

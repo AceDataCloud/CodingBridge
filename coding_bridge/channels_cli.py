@@ -140,6 +140,165 @@ def cmd_channels_init(settings: Settings) -> int:
     return 0
 
 
+# ---------- enable ------------------------------------------------------------
+
+
+def _derive_instance_id(base_url: str) -> str:
+    """A stable, collision-resistant instance id from the gateway host.
+
+    ``https://ebcdd3c54eb2.wisdom.acedata.cloud`` -> ``wisdom-ebcdd3c54eb2`` so
+    two AceData appliances stay human-readable and distinct. For any other host
+    use the FULL host (dots -> dashes) so unrelated gateways never collapse to
+    the same id, e.g. ``foo.example.com`` -> ``foo-example-com`` and
+    ``http://1.2.3.4:8000`` -> ``1-2-3-4``.
+    """
+    from urllib.parse import urlparse
+
+    host = (urlparse(base_url).hostname or "wechat").lower()
+    labels = [p for p in host.split(".") if p]
+    if len(labels) >= 3 and labels[1] == "wisdom":
+        return f"wisdom-{labels[0]}"
+    return "-".join(labels) if labels else "wechat"
+
+
+def cmd_channels_enable(
+    settings: Settings,
+    *,
+    base_url: str | None,
+    instance_id: str | None,
+    token_env: str | None,
+    sender: list[str] | None,
+) -> int:
+    """Non-interactively add/enable a ``[[channels.wechat]]`` instance.
+
+    Fills the gap the portal used to require a human for: given a gateway URL
+    (flag or ``WECHAT_BASE_URL``), it writes a valid, enabled block into
+    ``channels.toml`` - creating the file (0600) if missing, or merging into an
+    existing one by ``instance_id`` without touching other channels. Idempotent:
+    re-running with the same values just rewrites the same block.
+    """
+    from dataclasses import replace as _dc_replace
+    from urllib.parse import urlparse
+
+    from .channels.config import WeChatInstanceConfig
+    from .channels.portal import dump_channels_toml
+
+    resolved_url = base_url or os.environ.get("WECHAT_BASE_URL")
+    if not resolved_url:
+        print(
+            "No gateway URL. Pass --base-url <https://...> or set WECHAT_BASE_URL.",
+            file=sys.stderr,
+        )
+        return 1
+    resolved_url = resolved_url.rstrip("/")
+    # Validate up front (same rules the loader enforces) so we never persist a
+    # base_url that `doctor`/`start` will later reject - and never write a URL
+    # with embedded credentials into the file.
+    if not (resolved_url.startswith("http://") or resolved_url.startswith("https://")):
+        print(
+            f"Invalid --base-url {resolved_url!r}: must start with http:// or https://",
+            file=sys.stderr,
+        )
+        return 1
+    parsed = urlparse(resolved_url)
+    if not parsed.hostname:
+        print(f"Invalid --base-url {resolved_url!r}: no host", file=sys.stderr)
+        return 1
+    if "@" in parsed.netloc:
+        print(
+            f"Invalid --base-url {resolved_url!r}: must not contain embedded "
+            "credentials (user:pass@host); the token goes in WECHAT_TOKEN.",
+            file=sys.stderr,
+        )
+        return 1
+    resolved_id = instance_id or os.environ.get("WECHAT_INSTANCE_ID") or _derive_instance_id(
+        resolved_url
+    )
+    resolved_token_env = token_env or os.environ.get("WECHAT_TOKEN_ENV") or "WECHAT_TOKEN"
+
+    path = settings.channels_config_path
+    existing = None
+    if path.exists():
+        try:
+            existing = load_channels_config(path)
+        except ConfigError as exc:
+            print(f"Existing {path} is invalid, refusing to edit: {exc}", file=sys.stderr)
+            print(
+                "Fix or delete it, then re-run `coding-bridge channels enable`.",
+                file=sys.stderr,
+            )
+            return 1
+
+    # Merge: update the instance with the same id (PRESERVING its other fields -
+    # allowed_senders, rate limits, approval, etc. - so a re-run can't silently
+    # widen a previously restricted bot), keep every other channel untouched.
+    prior = None
+    if existing is not None:
+        prior = next((i for i in existing.wechat if i.instance_id == resolved_id), None)
+
+    if prior is not None:
+        # Only override what the caller actually specified.
+        new_inst = _dc_replace(
+            prior,
+            base_url=resolved_url,
+            token_env=resolved_token_env,
+            enabled=True,
+        )
+        if sender is not None:
+            new_inst = _dc_replace(new_inst, allowed_senders=tuple(sender))
+    else:
+        new_inst = WeChatInstanceConfig(
+            instance_id=resolved_id,
+            base_url=resolved_url,
+            token_env=resolved_token_env,
+            enabled=True,
+            # Free-form by default (reply to every message) - a personal bridge
+            # to your own gateway; add --sender to restrict who can drive it.
+            trigger_prefix="",
+            allowed_senders=tuple(sender or ()),
+        )
+    senders = list(new_inst.allowed_senders)
+
+    wechat: list[WeChatInstanceConfig] = []
+    replaced = False
+    if existing is not None:
+        for inst in existing.wechat:
+            if inst.instance_id == resolved_id:
+                wechat.append(new_inst)
+                replaced = True
+            else:
+                wechat.append(inst)
+    if not replaced:
+        wechat.append(new_inst)
+    telegram = list(existing.telegram) if existing is not None else []
+
+    from .channels.config import ChannelsConfig
+
+    body = dump_channels_toml(ChannelsConfig(wechat=tuple(wechat), telegram=tuple(telegram)))
+    if path.exists():
+        path.write_text(body, encoding="utf-8")
+    else:
+        _write_secure_file(path, body)
+    if sys.platform != "win32":
+        with contextlib.suppress(OSError):
+            path.chmod(0o600)
+
+    action = "Updated" if replaced else "Enabled"
+    print(f"{action} wechat instance {resolved_id!r} in {path}")
+    print(f"  base_url  = {resolved_url}")
+    print(f"  token_env = {resolved_token_env}")
+    if not senders:
+        print("  allowed_senders = []  (everyone - restrict with --sender <wxid> if shared)")
+    token_set = bool(os.environ.get(resolved_token_env))
+    if not token_set:
+        print(f"\nNext: export {resolved_token_env}=\"<gateway token>\" in this shell,")
+        print("      then `coding-bridge channels doctor` and `channels start`.")
+    else:
+        print("\nNext: `coding-bridge channels doctor` then `coding-bridge channels start`.")
+    return 0
+
+
+
 # ---------- doctor ------------------------------------------------------------
 
 
@@ -638,6 +797,41 @@ def register_subparsers(
     )
     p_init.set_defaults(func=_dispatch_init)
 
+    p_enable = sub.add_parser(
+        "enable",
+        help="Add/enable a WeChat instance from a URL or env vars (no manual editing)",
+        parents=[common],
+    )
+    p_enable.add_argument(
+        "channel",
+        choices=["wechat"],
+        help="Channel to enable (only 'wechat' today; Telegram needs no gateway URL).",
+    )
+    p_enable.add_argument(
+        "--base-url",
+        default=None,
+        help="Gateway URL, e.g. https://<id>.wisdom.acedata.cloud. "
+        "Falls back to the WECHAT_BASE_URL env var.",
+    )
+    p_enable.add_argument(
+        "--id",
+        dest="instance_id",
+        default=None,
+        help="Instance id (unique). Default: derived from the gateway host.",
+    )
+    p_enable.add_argument(
+        "--token-env",
+        default=None,
+        help="Env var name holding the gateway token. Default: WECHAT_TOKEN.",
+    )
+    p_enable.add_argument(
+        "--sender",
+        action="append",
+        default=None,
+        help="Restrict to this sender wxid (repeatable). Default: allow all.",
+    )
+    p_enable.set_defaults(func=_dispatch_enable)
+
     p_start = sub.add_parser(
         "start",
         help="Run every enabled [[channels.wechat]] instance until Ctrl-C",
@@ -704,6 +898,20 @@ def _dispatch_init(args: argparse.Namespace) -> None:
     from .cli import _build_settings  # local import to avoid circular
 
     raise SystemExit(cmd_channels_init(_build_settings(args)))
+
+
+def _dispatch_enable(args: argparse.Namespace) -> None:
+    from .cli import _build_settings
+
+    raise SystemExit(
+        cmd_channels_enable(
+            _build_settings(args),
+            base_url=args.base_url,
+            instance_id=args.instance_id,
+            token_env=args.token_env,
+            sender=args.sender,
+        )
+    )
 
 
 def _dispatch_start(args: argparse.Namespace) -> None:

@@ -1,6 +1,6 @@
 """Tests for the ``coding-bridge channels`` CLI subcommand group.
 
-Focus: pure surface — arg parsing, init file write behavior, doctor output
+Focus: pure surface - arg parsing, init file write behavior, doctor output
 against mocked httpx. `start` is thin glue and is smoke-tested by the E2E.
 """
 
@@ -46,7 +46,7 @@ class TestChannelsInit:
         assert rc == 0
         assert s.channels_config_path.exists()
         body = s.channels_config_path.read_text(encoding="utf-8")
-        # Every example is commented out — nothing enabled by default
+        # Every example is commented out - nothing enabled by default
         assert "# [[channels.wechat]]" in body
         # `enabled = false` appears in the template
         assert "enabled = false" in body
@@ -69,6 +69,120 @@ class TestChannelsInit:
 
         s = _settings(tmp_path)
         channels_cli.cmd_channels_init(s)
+        mode = _stat.S_IMODE(s.channels_config_path.stat().st_mode)
+        assert mode == 0o600, f"expected 0o600, got {oct(mode)}"
+
+
+# ---------- enable ------------------------------------------------------------
+
+
+class TestChannelsEnable:
+    def _enable(self, s, **kw):
+        kw.setdefault("base_url", None)
+        kw.setdefault("instance_id", None)
+        kw.setdefault("token_env", None)
+        kw.setdefault("sender", None)
+        return _capture(lambda: channels_cli.cmd_channels_enable(s, **kw))
+
+    def test_creates_enabled_block_from_flag(self, tmp_path: Path) -> None:
+        s = _settings(tmp_path)
+        rc, out, err = self._enable(
+            s, base_url="https://ebcdd3c54eb2.wisdom.acedata.cloud"
+        )
+        assert rc == 0
+        assert s.channels_config_path.exists()
+        cfg = channels_cli.load_channels_config(s.channels_config_path)
+        assert len(cfg.wechat) == 1
+        inst = cfg.wechat[0]
+        assert inst.enabled is True
+        assert inst.base_url == "https://ebcdd3c54eb2.wisdom.acedata.cloud"
+        # id derived from a *.wisdom.acedata.cloud host
+        assert inst.instance_id == "wisdom-ebcdd3c54eb2"
+        assert inst.token_env == "WECHAT_TOKEN"
+
+    def test_reads_base_url_from_env(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("WECHAT_BASE_URL", "https://host.example.com")
+        s = _settings(tmp_path)
+        rc, out, err = self._enable(s)
+        assert rc == 0
+        cfg = channels_cli.load_channels_config(s.channels_config_path)
+        assert cfg.wechat[0].base_url == "https://host.example.com"
+
+    def test_missing_url_errors(self, tmp_path: Path) -> None:
+        s = _settings(tmp_path)
+        rc, out, err = self._enable(s)
+        assert rc == 1
+        assert "WECHAT_BASE_URL" in err
+        assert not s.channels_config_path.exists()
+
+    def test_rerun_updates_in_place_no_duplicate(self, tmp_path: Path) -> None:
+        s = _settings(tmp_path)
+        self._enable(s, base_url="https://host.example.com", instance_id="w1")
+        self._enable(
+            s, base_url="https://host.example.com", instance_id="w1", sender=["Msg_x"]
+        )
+        cfg = channels_cli.load_channels_config(s.channels_config_path)
+        assert len(cfg.wechat) == 1
+        assert cfg.wechat[0].allowed_senders == ("Msg_x",)
+
+    def test_rerun_without_sender_preserves_restrictions(self, tmp_path: Path) -> None:
+        # A re-run that omits --sender must NOT widen a previously restricted bot.
+        s = _settings(tmp_path)
+        self._enable(
+            s, base_url="https://host.example.com", instance_id="w1", sender=["Msg_x"]
+        )
+        self._enable(s, base_url="https://host.example.com", instance_id="w1")
+        cfg = channels_cli.load_channels_config(s.channels_config_path)
+        assert cfg.wechat[0].allowed_senders == ("Msg_x",)
+
+    def test_rejects_non_http_url(self, tmp_path: Path) -> None:
+        s = _settings(tmp_path)
+        rc, out, err = self._enable(s, base_url="ftp://x.example.com")
+        assert rc == 1
+        assert "http://" in err
+        assert not s.channels_config_path.exists()
+
+    def test_rejects_embedded_credentials(self, tmp_path: Path) -> None:
+        s = _settings(tmp_path)
+        rc, out, err = self._enable(s, base_url="https://user:pass@host.example.com")
+        assert rc == 1
+        assert "credentials" in err.lower()
+        assert not s.channels_config_path.exists()
+
+    def test_derived_id_uses_full_host_for_non_wisdom(self, tmp_path: Path) -> None:
+        s = _settings(tmp_path)
+        self._enable(s, base_url="https://foo.example.com")
+        cfg = channels_cli.load_channels_config(s.channels_config_path)
+        assert cfg.wechat[0].instance_id == "foo-example-com"
+
+    def test_preserves_other_instances(self, tmp_path: Path) -> None:
+        s = _settings(tmp_path)
+        self._enable(s, base_url="https://a.example.com", instance_id="a")
+        self._enable(s, base_url="https://b.example.com", instance_id="b")
+        cfg = channels_cli.load_channels_config(s.channels_config_path)
+        ids = sorted(i.instance_id for i in cfg.wechat)
+        assert ids == ["a", "b"]
+
+    def test_refuses_to_edit_invalid_existing(self, tmp_path: Path) -> None:
+        s = _settings(tmp_path)
+        s.channels_config_path.parent.mkdir(parents=True, exist_ok=True)
+        # A wechat block missing instance_id -> load fails -> enable must refuse.
+        s.channels_config_path.write_text(
+            "[[channels.wechat]]\nbase_url = 'https://x.example.com'\nenabled = true\n",
+            encoding="utf-8",
+        )
+        rc, out, err = self._enable(s, base_url="https://y.example.com")
+        assert rc == 1
+        assert "refusing to edit" in err.lower()
+
+    @pytest.mark.skipif(os.name == "nt", reason="POSIX permission bits don't apply on Windows")
+    def test_created_file_is_0600(self, tmp_path: Path) -> None:
+        import stat as _stat
+
+        s = _settings(tmp_path)
+        self._enable(s, base_url="https://host.example.com")
         mode = _stat.S_IMODE(s.channels_config_path.stat().st_mode)
         assert mode == 0o600, f"expected 0o600, got {oct(mode)}"
 
@@ -118,7 +232,7 @@ class TestChannelsDoctor:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         # Patch WeChatClient to use a MockTransport where the tasks endpoint
-        # returns 404 (token accepted, probe id unknown) — the happy path.
+        # returns 404 (token accepted, probe id unknown) - the happy path.
         monkeypatch.setenv("MY_TOKEN", "abc")
         s = _settings(tmp_path)
         s.config_dir.mkdir(parents=True, exist_ok=True)
@@ -380,7 +494,7 @@ class TestChannelsSmoke:
     def test_smoke_timeout_no_text_exits_1(self, tmp_path: Path, monkeypatch) -> None:
         # Provider emits NOTHING and never signals completion. With a tiny
         # turn_timeout the dispatcher synthesises "(provider timed out; no
-        # reply)" — smoke must report failure (rc=1), not a false-healthy 0.
+        # reply)" - smoke must report failure (rc=1), not a false-healthy 0.
         # (This is the BLOCKER the adversarial review caught: the old exit-code
         # check ignored the timeout marker.)
         def script(_sid):

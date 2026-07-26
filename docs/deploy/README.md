@@ -1,4 +1,16 @@
-# Running `coding-bridge channels` as a service
+# Running `coding-bridge` as a service
+
+> **Most people don't need this page.** The built-in commands register a
+> user-scoped service for you:
+>
+> - **Main daemon:** `coding-bridge pair` then `coding-bridge service install`
+>   (or `brew services start coding-bridge` on Homebrew).
+> - **Chat bridge:** `coding-bridge channels install-service`.
+>
+> The templates below are the manual, hand-tuned fallback — reach for them when
+> you want to customize the unit (hardening, logging, an `EnvironmentFile`, a
+> system-wide install). Each `channels start` example has a `run` variant: swap
+> the command to run the **main daemon** instead of the chat bridge.
 
 The `coding-bridge channels start` command is a long-running, outbound-only
 daemon: it connects to each enabled WeChat gateway endpoint, relays `/ask …` messages

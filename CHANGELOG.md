@@ -6,6 +6,27 @@ Coding Bridge ships continuously: every merge to `main` publishes a new
 This file records notable, user-facing changes grouped by theme rather than by
 individual build number.
 
+## 2026-07-26 — Run as a service + more install channels
+
+Keep the daemon alive across logout/reboot with a one-liner, and install from the
+package managers developers already use.
+
+### Added
+
+- **`coding-bridge service` command** — full-lifecycle, user-scoped management of
+  the main daemon as an OS service: `install` / `start` / `stop` / `status` /
+  `uninstall`, driving `systemd --user` (Linux), a LaunchAgent (macOS), or a
+  per-user scheduled task (Windows). `install` refuses until the machine is
+  paired (a service can't pair interactively) and never runs as root/SYSTEM, so
+  it keeps your Claude/Codex login.
+- **Homebrew tap** — `brew tap acedatacloud/tap && brew install coding-bridge`,
+  with a `service` block so `brew services start coding-bridge` works after
+  pairing.
+- **Windows Scoop bucket** — `scoop bucket add acedata …; scoop install
+  coding-bridge`.
+- **uv support** documented — `uv tool install coding-bridge` / `uvx
+  coding-bridge`.
+
 ## 2026-07-03 — WeChat chat channels
 
 Drive Claude Code / Codex from a personal **WeChat** account: message the account

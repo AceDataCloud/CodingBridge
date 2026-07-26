@@ -60,9 +60,29 @@ bypassPermissions → danger-full-access).
 pipx install coding-bridge      # recommended
 # or
 pip install coding-bridge
+# or, with uv:
+uv tool install coding-bridge   # then `coding-bridge ...`, or one-shot `uvx coding-bridge`
 ```
 
-On Windows, if `pipx` is not installed, use the Python launcher directly:
+**macOS / Linux — Homebrew:**
+
+```bash
+brew tap acedatacloud/tap
+brew install coding-bridge
+```
+
+The Homebrew formula also registers a launchd/systemd service, so after pairing
+once you can `brew services start coding-bridge` (see *Running as a background
+service* below).
+
+**Windows — Scoop:**
+
+```powershell
+scoop bucket add acedata https://github.com/AceDataCloud/scoop-bucket
+scoop install coding-bridge
+```
+
+On Windows without Scoop or `pipx`, use the Python launcher directly:
 
 ```powershell
 py -m pip install --user --upgrade coding-bridge
@@ -98,10 +118,27 @@ connects.
 
 ### Running as a background service
 
-To keep the daemon (or the `coding-bridge channels start` chat bridge) running
-across logout and reboot, install it as an OS service. Copy-paste templates for
-each platform are in [docs/deploy/](docs/deploy/README.md): systemd (Linux),
-Task Scheduler / NSSM (Windows), and launchd (macOS).
+To keep the daemon running across logout and reboot, register it as a
+**user-scoped** OS service (it runs as you, so it keeps your Claude/Codex login).
+Pair once first — a service can't pair interactively:
+
+```bash
+coding-bridge pair              # once, interactively
+coding-bridge service install   # writes + starts a systemd/launchd/schtasks unit
+```
+
+`service` manages the whole lifecycle: `install`, `start`, `stop`, `status`,
+`uninstall`. On Homebrew installs you can equivalently use
+`brew services start coding-bridge`.
+
+> Don't also run `coding-bridge up` in a terminal while the service is active —
+> two daemons share one node token and would fight over the connection.
+
+For the WeChat/Telegram chat bridge, the parallel command is
+`coding-bridge channels install-service`. Hand-written copy-paste templates for
+both (systemd, launchd, Task Scheduler / NSSM) live in
+[docs/deploy/](docs/deploy/README.md) if you'd rather configure the unit
+yourself.
 
 ## Commands
 
@@ -112,6 +149,7 @@ Task Scheduler / NSSM (Windows), and launchd (macOS).
 | `run`     | Run using stored credentials (errors if not paired)      |
 | `status`  | Show configuration and whether this machine is paired    |
 | `logout`  | Remove stored credentials                                |
+| `service` | Manage the daemon as a background OS service (see above)  |
 
 Run flags (`up` / `run`):
 

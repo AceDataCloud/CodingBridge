@@ -255,6 +255,17 @@ def main(argv: list[str] | None = None) -> None:
     )
     channels_cli.register_subparsers(p_channels, common)
 
+    # `coding-bridge service {install,start,stop,status,uninstall}` — run the
+    # main daemon as a user-scoped OS service. See service_cli.py.
+    from . import service_cli
+
+    p_service = sub.add_parser(
+        "service",
+        help="Manage the daemon as a background OS service (systemd/launchd/Task Scheduler)",
+        parents=[common],
+    )
+    service_cli.register_subparsers(p_service, common)
+
     args = parser.parse_args(argv)
     settings = _build_settings(args)
     log_path = logs.setup(settings.log_level, settings.log_dir)

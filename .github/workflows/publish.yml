@@ -129,3 +129,81 @@ jobs:
             --title "v${{ needs.build.outputs.version }}" \
             --generate-notes \
             --repo '${{ github.repository }}' || echo "Release already exists, skipping"
+
+  bump-packages:
+    name: Bump Homebrew tap + Scoop bucket
+    if: github.event_name == 'push'
+    needs: [build, publish-pypi]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Resolve sdist url + sha256 from PyPI
+        id: pypi
+        env:
+          VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          # Poll PyPI until the just-published version's sdist is queryable.
+          for i in $(seq 1 30); do
+            JSON=$(curl -fsS "https://pypi.org/pypi/coding-bridge/$VERSION/json" || true)
+            if [ -n "$JSON" ]; then break; fi
+            sleep 10
+          done
+          if [ -z "$JSON" ]; then echo "PyPI never served $VERSION"; exit 1; fi
+          export JSON
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import json, os
+          d = json.loads(os.environ["JSON"])
+          sd = next(u for u in d["urls"] if u["packagetype"] == "sdist")
+          print(f"url={sd['url']}")
+          print(f"sha256={sd['digests']['sha256']}")
+          PY
+      - name: Update Homebrew formula
+        env:
+          TAP_TOKEN: ${{ secrets.PACKAGES_BUMP_TOKEN }}
+          VERSION: ${{ needs.build.outputs.version }}
+          URL: ${{ steps.pypi.outputs.url }}
+          SHA: ${{ steps.pypi.outputs.sha256 }}
+        run: |
+          if [ -z "$TAP_TOKEN" ]; then
+            echo "PACKAGES_BUMP_TOKEN not set — skipping tap bump."; exit 0
+          fi
+          git clone "https://x-access-token:$TAP_TOKEN@github.com/AceDataCloud/homebrew-tap.git" tap
+          F=tap/Formula/coding-bridge.rb
+          python3 - "$F" "$URL" "$SHA" <<'PY'
+          import re, sys
+          path, url, sha = sys.argv[1:4]
+          s = open(path).read()
+          s = re.sub(r'url "https://files\.pythonhosted\.org/[^"]+"', f'url "{url}"', s, count=1)
+          s = re.sub(r'sha256 "[0-9a-f]{64}"', f'sha256 "{sha}"', s, count=1)
+          open(path, "w").write(s)
+          PY
+          cd tap
+          if git diff --quiet; then echo "tap already current"; exit 0; fi
+          git -c user.name="Ace Data Cloud Dev" -c user.email="dev@acedata.cloud" \
+            commit -am "coding-bridge $VERSION"
+          git push
+          echo "note: dependency resource blocks are NOT auto-updated; run" \
+               "\`brew update-python-resources\` when deps change."
+
+      - name: Update Scoop manifest
+        env:
+          TAP_TOKEN: ${{ secrets.PACKAGES_BUMP_TOKEN }}
+          VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          if [ -z "$TAP_TOKEN" ]; then
+            echo "PACKAGES_BUMP_TOKEN not set — skipping bucket bump."; exit 0
+          fi
+          git clone "https://x-access-token:$TAP_TOKEN@github.com/AceDataCloud/scoop-bucket.git" bucket
+          python3 - bucket/bucket/coding-bridge.json "$VERSION" <<'PY'
+          import json, sys
+          path, version = sys.argv[1:3]
+          d = json.load(open(path))
+          d["version"] = version
+          json.dump(d, open(path, "w"), indent=4)
+          open(path, "a").write("\n")
+          PY
+          cd bucket
+          if git diff --quiet; then echo "bucket already current"; exit 0; fi
+          git -c user.name="Ace Data Cloud Dev" -c user.email="dev@acedata.cloud" \
+            commit -am "coding-bridge $VERSION"
+          git push
+

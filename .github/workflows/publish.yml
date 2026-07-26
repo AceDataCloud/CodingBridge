@@ -5,6 +5,13 @@ on:
     branches: [main]
   workflow_dispatch:
 
+# Serialize releases: two concurrent runs would publish distinct CalVers and
+# race each other's pushes to the tap/bucket. Never cancel in flight — a
+# half-done release is worse than a queued one.
+concurrency:
+  group: publish-coding-bridge
+  cancel-in-progress: false
+
 jobs:
   build:
     name: Build distribution
@@ -132,7 +139,11 @@ jobs:
 
   bump-packages:
     name: Bump Homebrew tap + Scoop bucket
-    if: github.event_name == 'push'
+    # Also on workflow_dispatch: a manual run publishes a fresh CalVer and bumps
+    # the packages to it, which is how you recover when a bump was skipped (e.g.
+    # PACKAGES_BUMP_TOKEN wasn't set yet). It does not backfill the older
+    # version. Steps are idempotent — they no-op when the packages are current.
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
     needs: [build, publish-pypi]
     runs-on: ubuntu-latest
     steps:

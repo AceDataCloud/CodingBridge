@@ -138,8 +138,6 @@ def cmd_service_action(settings: Settings, action: str) -> int:
         return 1
     if action == "start" and _system() == "darwin":
         _launchd_preclean(plan, _uid())  # bootstrap errors if already loaded
-    if action == "start" and _system() == "darwin":
-        _launchd_preclean(plan, _uid())  # bootstrap errors if already loaded
     rc = _run(manager_argv(_system(), action, plan, uid=_uid()))
     if action == "uninstall":
         # Remove the unit file after deregistering, regardless of the manager's

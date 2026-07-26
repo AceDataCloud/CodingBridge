@@ -56,31 +56,24 @@ sessions run via `codex exec`, so the session permission mode maps to a Codex
 sandbox policy (plan → read-only, default/acceptEdits → workspace-write,
 bypassPermissions → danger-full-access).
 
+Pick whichever fits your setup — they all install the same `coding-bridge` CLI:
+
+| Method | Command |
+| --- | --- |
+| **Homebrew** (macOS/Linux) | `brew tap acedatacloud/tap && brew install coding-bridge` |
+| **Scoop** (Windows) | `scoop bucket add acedata https://github.com/AceDataCloud/scoop-bucket`<br>`scoop install coding-bridge` |
+| **pipx** | `pipx install coding-bridge` |
+| **uv** | `uv tool install coding-bridge` (or one-shot `uvx coding-bridge`) |
+| **pip** | `pip install coding-bridge` |
+
+Verify it landed:
+
 ```bash
-pipx install coding-bridge      # recommended
-# or
-pip install coding-bridge
-# or, with uv:
-uv tool install coding-bridge   # then `coding-bridge ...`, or one-shot `uvx coding-bridge`
+coding-bridge status
 ```
 
-**macOS / Linux — Homebrew:**
-
-```bash
-brew tap acedatacloud/tap
-brew install coding-bridge
-```
-
-The Homebrew formula also registers a launchd/systemd service, so after pairing
-once you can `brew services start coding-bridge` (see *Running as a background
-service* below).
-
-**Windows — Scoop:**
-
-```powershell
-scoop bucket add acedata https://github.com/AceDataCloud/scoop-bucket
-scoop install coding-bridge
-```
+The Homebrew formula also ships a service definition, so after pairing you can
+`brew services start coding-bridge` (see *Running as a background service*).
 
 On Windows without Scoop or `pipx`, use the Python launcher directly:
 
@@ -119,20 +112,70 @@ connects.
 ### Running as a background service
 
 To keep the daemon running across logout and reboot, register it as a
-**user-scoped** OS service (it runs as you, so it keeps your Claude/Codex login).
-Pair once first — a service can't pair interactively:
+**user-scoped** OS service. Pair once first — a service can't pair
+interactively:
 
 ```bash
 coding-bridge pair              # once, interactively
-coding-bridge service install   # writes + starts a systemd/launchd/schtasks unit
+coding-bridge service install   # registers + starts it, and enables it at login
 ```
 
-`service` manages the whole lifecycle: `install`, `start`, `stop`, `status`,
-`uninstall`. On Homebrew installs you can equivalently use
+That's it. On a Homebrew install you can equivalently use
 `brew services start coding-bridge`.
 
-> Don't also run `coding-bridge up` in a terminal while the service is active —
-> two daemons share one node token and would fight over the connection.
+| Command | What it does |
+| --- | --- |
+| `service install` | Write the unit, register it, start it now, enable at login (`--force` overwrites an existing unit) |
+| `service start` | Start the installed service |
+| `service stop` | Stop it (stays installed) |
+| `service status` | Ask the OS service manager for its state |
+| `service uninstall` | Stop, deregister, and delete the unit file |
+
+Under the hood it uses your platform's native manager — nothing to configure:
+
+| Platform | Manager | Unit written to |
+| --- | --- | --- |
+| Linux | `systemd --user` | `~/.config/systemd/user/coding-bridge.service` |
+| macOS | launchd LaunchAgent | `~/Library/LaunchAgents/cloud.acedata.coding-bridge.plist` |
+| Windows | Task Scheduler | `~/.ace-bridge/run-daemon.cmd`, task `CodingBridge` |
+
+**Check it's working.** After `service install` the node should show up online
+in the web app. To confirm locally:
+
+```bash
+coding-bridge service status
+tail -f ~/.ace-bridge/logs/agent.log     # look for "registered with bridge"
+```
+
+A healthy start logs (the first line only when it had to widen `PATH`):
+
+```
+added to PATH for CLI discovery: [...]
+connected to bridge as node node_XXXXXXX
+registered with bridge
+```
+
+#### Notes and troubleshooting
+
+- **It runs as *you*, never as root/SYSTEM.** That's deliberate: the daemon
+  shells out to your `claude` / `codex` CLIs and needs your login and your
+  `PATH` (including nvm/volta installs, which it re-discovers on startup).
+- **Don't also run `coding-bridge up` in a terminal** while the service is
+  active — two daemons sharing one node token would fight over the connection
+  and tear down every session, so the second one refuses to start and tells you.
+- **`Not paired` on install** → run `coding-bridge pair` first.
+- **Service starts then dies** → check the log above. The usual cause is an
+  unpaired or revoked token. If it's instead failing to find your `claude` /
+  `codex` CLI: the daemon already re-discovers nvm/volta/`~/.local/bin` on
+  startup, but if you need an explicit override you must add it to the unit
+  itself — the `--claude-path` flag only applies to `coding-bridge run`, and a
+  service doesn't inherit your shell's exports. For systemd, add
+  `Environment="CODING_BRIDGE_CLAUDE_PATH=/path/to/claude"` to
+  `~/.config/systemd/user/coding-bridge.service`, then
+  `systemctl --user daemon-reload && systemctl --user restart coding-bridge.service`
+  (macOS: the plist's `EnvironmentVariables` dict; Windows: a `set` line in
+  `run-daemon.cmd`).
+- **Linux: keep it running after logout** → `sudo loginctl enable-linger $USER`.
 
 For the WeChat/Telegram chat bridge, the parallel command is
 `coding-bridge channels install-service`. Hand-written copy-paste templates for
@@ -158,6 +201,9 @@ Run flags (`up` / `run`):
 | `--model`               | Default Claude model for new sessions                |
 | `--cwd`                 | Default working directory for new sessions           |
 | `--permission-timeout`  | Seconds to wait for a permission decision (0 = wait) |
+| `--claude-path`         | Explicit path to the `claude` CLI (nvm/volta installs) |
+| `--codex-path`          | Explicit path to the `codex` CLI                     |
+| `--copilot-path`        | Explicit path to the GitHub Copilot CLI              |
 
 Global flags: `--bridge-url`, `--name`, `--config-dir`.
 

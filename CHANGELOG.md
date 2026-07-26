@@ -27,6 +27,15 @@ package managers developers already use.
 - **uv support** documented — `uv tool install coding-bridge` / `uvx
   coding-bridge`.
 
+### Docs
+
+- **README install matrix** — every channel (Homebrew / Scoop / pipx / uv / pip)
+  in one table, plus a `coding-bridge status` check to confirm the install.
+- **Service section rewritten** — a table of the five `service` subcommands, the
+  unit location per platform, how to verify it connected (`registered with
+  bridge` in `~/.ace-bridge/logs/`), and troubleshooting for the common failures
+  (not paired, provider CLI not on the service's `PATH`, logout on Linux).
+
 ## 2026-07-03 — WeChat chat channels
 
 Drive Claude Code / Codex from a personal **WeChat** account: message the account

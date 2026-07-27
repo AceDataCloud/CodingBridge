@@ -1,11 +1,13 @@
 # Running `coding-bridge` as a service
 
-> **Most people don't need this page.** The built-in commands register a
-> user-scoped service for you:
+> **Most people don't need this page.** The built-in commands handle the unit
+> for you:
 >
 > - **Main daemon:** `coding-bridge pair` then `coding-bridge service install`
->   (or `brew services start coding-bridge` on Homebrew).
-> - **Chat bridge:** `coding-bridge channels install-service`.
+>   registers and starts it (or `brew services start coding-bridge` on
+>   Homebrew) — see [../service.md](../service.md).
+> - **Chat bridge:** `coding-bridge channels install-service` writes the unit
+>   and prints the command(s) that enable it — see [../channels.md](../channels.md).
 >
 > The templates below are the manual, hand-tuned fallback — reach for them when
 > you want to customize the unit (hardening, logging, an `EnvironmentFile`, a

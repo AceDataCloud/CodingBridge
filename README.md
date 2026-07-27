@@ -35,25 +35,25 @@ coding-bridge status
 
 ## Setup
 
-**1. Open the device page.** Go to
-[studio.acedata.cloud/coding-bridge](https://studio.acedata.cloud/coding-bridge),
-sign in with your Ace account, and click **Pair device**.
-
-**2. Get a pair code.** On the machine you want to control:
+**1. Get a pair code.** On the machine you want to control:
 
 ```bash
 coding-bridge pair
 ```
 
-It prints a short pair code (plus a direct link and, with the `qr` extra, a QR
-code).
+It prints a short pair code, a direct link, and — with the `qr` extra — a QR
+code.
 
-**3. Enter the code** in the dialog from step 1 — or just open the link the CLI
-printed, which fills it in for you. The daemon stores a node token at
-`~/.ace-bridge/credentials.json` (mode `0600`); you never pair this machine
-again.
+**2. Claim it in the browser.** Open the link the CLI printed (it fills the code
+in for you), or go to
+[studio.acedata.cloud/coding-bridge](https://studio.acedata.cloud/coding-bridge),
+click **Pair device**, and type the code.
 
-**4. Run it.** Foreground, to try it out:
+Sign in with your Ace account if you aren't already. Once claimed, the daemon
+stores a node token at `~/.ace-bridge/credentials.json` (mode `0600`) — you
+never pair this machine again.
+
+**3. Run it.** Foreground, to try it out:
 
 ```bash
 coding-bridge up          # pairs if needed, then serves sessions until Ctrl-C
@@ -65,6 +65,11 @@ want day to day:
 ```bash
 coding-bridge service install    # registers, starts now, and enables at login
 ```
+
+On a Homebrew install, `brew services start coding-bridge` starts the daemon
+through Homebrew's own service manager instead — pick one, not both. Either way,
+pair first (step 1): the service runs `coding-bridge run`, which exits non-zero
+when unpaired.
 
 The node should now show **online** on the device page, and you can start a
 session from the browser or your phone.

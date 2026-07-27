@@ -11,8 +11,24 @@ coding-bridge service install
 ```
 
 That's it: `install` writes the unit, registers it, starts it now, and enables
-it at login. On a Homebrew install, `brew services start coding-bridge` does the
-same thing.
+it at login.
+
+On a Homebrew install you can start the daemon through Homebrew's own service
+manager instead:
+
+```bash
+coding-bridge pair                   # still required first
+brew services start coding-bridge
+```
+
+The formula's service runs `coding-bridge run` as your user, restarts on crash
+(but not after a clean `brew services stop`), and logs to
+`$(brew --prefix)/var/log/coding-bridge.log`. Pair *before* starting: an
+unpaired `run` exits non-zero, and the service just stays dead.
+
+Use **either** `service install` **or** `brew services` — not both. They
+register two independent units, and the second daemon to start will refuse
+(one node token, one connection).
 
 ## Commands
 

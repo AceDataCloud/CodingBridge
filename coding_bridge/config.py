@@ -29,22 +29,28 @@ def _default_node_name() -> str:
 def _safe_default_cwd() -> str:
     """A sane default working directory.
 
-    Normally the directory the daemon was launched from. But when it runs as a
-    Windows service / from an OS launcher, ``os.getcwd()`` is ``C:\\Windows\\System32``
-    — never a place to run code in. Fall back to the user's home in that case so a
-    session that arrives without an explicit cwd (e.g. resumed-from-history when the
-    transcript carried no cwd) doesn't silently land in System32.
+    Normally the directory the daemon was launched from. But an OS launcher gives
+    the daemon a cwd nobody would run code in: ``C:\\Windows\\System32`` for a
+    Windows service, ``/`` for launchd/systemd. Fall back to the user's home in
+    those cases so a session that arrives without an explicit cwd (e.g. resumed
+    from history when the transcript carried no cwd) doesn't silently land there
+    — and so every such session groups under one predictable project directory in
+    the session pickers instead of scattering.
     """
+    home = str(Path.home())
     try:
         cwd = Path(os.getcwd()).resolve()
     except OSError:
-        return str(Path.home())
+        return home
+    # Filesystem root (POSIX "/", or a bare drive root like "C:\\").
+    if cwd.parent == cwd:
+        return home
     system_root = os.environ.get("SYSTEMROOT") or os.environ.get("WINDIR")
     if system_root:
         try:
             sys_dir = Path(system_root).resolve()
             if cwd == sys_dir or sys_dir in cwd.parents:
-                return str(Path.home())
+                return home
         except OSError:
             pass
     return str(cwd)

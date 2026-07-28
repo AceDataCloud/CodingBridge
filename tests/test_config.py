@@ -44,6 +44,40 @@ def test_default_cwd_keeps_normal_dir(monkeypatch, tmp_path):
     assert Path(settings.default_cwd) == project.resolve()
 
 
+def test_default_cwd_falls_back_to_home_at_filesystem_root(monkeypatch, tmp_path):
+    """launchd/systemd hand the daemon "/" — never a place to run an agent."""
+    root = str(Path(tmp_path.anchor))
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.delenv("SYSTEMROOT", raising=False)
+    monkeypatch.delenv("WINDIR", raising=False)
+    monkeypatch.setattr("os.getcwd", lambda: root)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    settings = Settings()
+    assert Path(settings.default_cwd) == home
+
+
+def test_default_cwd_falls_back_to_home_when_getcwd_fails(monkeypatch, tmp_path):
+    """A deleted cwd raises; the daemon must still come up somewhere sane."""
+    home = tmp_path / "home"
+    home.mkdir()
+
+    def _boom():
+        raise OSError("cwd is gone")
+
+    monkeypatch.setattr("os.getcwd", _boom)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    assert Path(Settings().default_cwd) == home
+
+
+def test_explicit_cwd_is_never_overridden(monkeypatch, tmp_path):
+    """An operator-supplied cwd wins even if the daemon was launched from "/"."""
+    project = tmp_path / "project"
+    project.mkdir()
+    monkeypatch.setattr("os.getcwd", lambda: str(Path(tmp_path.anchor)))
+    assert Settings(default_cwd=str(project)).default_cwd == str(project)
+
+
 def test_from_env(monkeypatch):
     monkeypatch.setenv("CODING_BRIDGE_URL", "https://bridge.example")
     monkeypatch.setenv("CODING_BRIDGE_PERMISSION_TIMEOUT", "12.5")

@@ -1,4 +1,5 @@
 import json
+import logging
 
 import pytest
 
@@ -242,6 +243,9 @@ def test_read_claude_session_normalises_blocks(monkeypatch, tmp_path):
 def test_read_codex_session_filters_and_maps(monkeypatch, tmp_path):
     _patch_roots(monkeypatch, tmp_path)
     detail = history.read_session("codex", CODEX_SID)
+    # The detail header must agree with the list, i.e. the provider's own thread
+    # name, not the first prompt.
+    assert detail["title"] == "My Codex Thread"
     kinds = [e["kind"] for e in detail["events"]]
     # developer instructions dropped; tool calls mapped to tool_use/tool_result.
     assert kinds == ["prompt", "thinking", "tool_use", "tool_result", "text"]
@@ -412,6 +416,230 @@ def test_claude_skips_ide_noise_block_uses_real_prompt(monkeypatch, tmp_path):
     detail = history.read_session("claude", "sid-ide")
     prompts = [e["text"] for e in detail["events"] if e["kind"] == "prompt"]
     assert prompts == ["Hello, what's in this project?"]
+
+
+def test_claude_prefers_ai_title_over_first_prompt(monkeypatch, tmp_path):
+    claude_root = tmp_path / "claude"
+    records = [
+        {
+            "type": "user",
+            "cwd": "/home/me/p",
+            "timestamp": "2025-06-01T10:00:00.000Z",
+            "message": {
+                "role": "user",
+                "content": "你这个 x skill 是不是有问题啊。。为啥都限制是某个账号啊？？",
+            },
+        },
+        {"type": "ai-title", "aiTitle": "移除 skill 特定账号校验", "sessionId": "sid-title"},
+        # Claude Code refines the title as the conversation goes; the last wins.
+        {"type": "ai-title", "aiTitle": "移除 x skill 的账号限制", "sessionId": "sid-title"},
+    ]
+    _write_jsonl(claude_root / "-home-me-p" / "sid-title.jsonl", records)
+    monkeypatch.setattr(history, "CLAUDE_ROOT", claude_root)
+    monkeypatch.setattr(history, "CODEX_ROOT", tmp_path / "none")
+    monkeypatch.setattr(history, "CODEX_INDEX", tmp_path / "none.jsonl")
+    monkeypatch.setattr(history, "COPILOT_ROOT", tmp_path / "none-copilot")
+    claude = next(s for s in history.list_sessions() if s["provider"] == "claude")
+    assert claude["title"] == "移除 x skill 的账号限制"
+    assert claude["message_count"] == 1  # ai-title rows are not messages
+    assert history.read_session("claude", "sid-title")["title"] == "移除 x skill 的账号限制"
+
+
+def test_claude_falls_back_to_prompt_without_ai_title(monkeypatch, tmp_path):
+    claude_root = tmp_path / "claude"
+    _write_jsonl(
+        claude_root / "-home-me-p" / "sid-noai.jsonl",
+        [
+            {
+                "type": "user",
+                "cwd": "/home/me/p",
+                "timestamp": "2025-06-01T10:00:00.000Z",
+                "message": {"role": "user", "content": "just a prompt"},
+            },
+            {"type": "ai-title", "aiTitle": "", "sessionId": "sid-noai"},
+        ],
+    )
+    monkeypatch.setattr(history, "CLAUDE_ROOT", claude_root)
+    monkeypatch.setattr(history, "CODEX_ROOT", tmp_path / "none")
+    monkeypatch.setattr(history, "CODEX_INDEX", tmp_path / "none.jsonl")
+    monkeypatch.setattr(history, "COPILOT_ROOT", tmp_path / "none-copilot")
+    claude = next(s for s in history.list_sessions() if s["provider"] == "claude")
+    assert claude["title"] == "just a prompt"
+    assert history.read_session("claude", "sid-noai")["title"] == "just a prompt"
+
+
+def test_claude_ai_title_edge_cases(monkeypatch, tmp_path):
+    claude_root = tmp_path / "claude"
+    long_title = "标题" * 100
+    _write_jsonl(
+        claude_root / "-home-me-p" / "sid-edge.jsonl",
+        [
+            {
+                "type": "user",
+                "cwd": "/home/me/p",
+                "timestamp": "2025-06-01T10:00:00.000Z",
+                "message": {"role": "user", "content": "prompt"},
+            },
+            # A stray message-shaped ai-title must not count as a message
+            # nor leak a model into the header.
+            {
+                "type": "ai-title",
+                "aiTitle": "good one",
+                "message": {"role": "user", "model": "bogus-model", "content": "nope"},
+            },
+            {"type": "ai-title", "aiTitle": ""},  # blank must not clobber
+            {"type": "ai-title", "aiTitle": {"text": "wrong type"}},  # must not crash
+            {"type": "ai-title", "aiTitle": f"<b>{long_title}</b>"},
+        ],
+    )
+    monkeypatch.setattr(history, "CLAUDE_ROOT", claude_root)
+    monkeypatch.setattr(history, "CODEX_ROOT", tmp_path / "none")
+    monkeypatch.setattr(history, "CODEX_INDEX", tmp_path / "none.jsonl")
+    monkeypatch.setattr(history, "COPILOT_ROOT", tmp_path / "none-copilot")
+    claude = next(s for s in history.list_sessions() if s["provider"] == "claude")
+    assert claude["message_count"] == 1
+    assert "<b>" not in claude["title"] and len(claude["title"]) == 80
+    detail = history.read_session("claude", "sid-edge")
+    assert detail["title"] == claude["title"]
+    assert detail["model"] is None
+
+
+def test_claude_blank_ai_title_does_not_clobber_earlier_one(monkeypatch, tmp_path):
+    claude_root = tmp_path / "claude"
+    _write_jsonl(
+        claude_root / "-home-me-p" / "sid-blank.jsonl",
+        [
+            {
+                "type": "user",
+                "cwd": "/home/me/p",
+                "timestamp": "2025-06-01T10:00:00.000Z",
+                "message": {"role": "user", "content": "prompt"},
+            },
+            {"type": "ai-title", "aiTitle": "real title"},
+            {"type": "ai-title", "aiTitle": ""},
+        ],
+    )
+    monkeypatch.setattr(history, "CLAUDE_ROOT", claude_root)
+    monkeypatch.setattr(history, "CODEX_ROOT", tmp_path / "none")
+    monkeypatch.setattr(history, "CODEX_INDEX", tmp_path / "none.jsonl")
+    monkeypatch.setattr(history, "COPILOT_ROOT", tmp_path / "none-copilot")
+    claude = next(s for s in history.list_sessions() if s["provider"] == "claude")
+    assert claude["title"] == "real title"
+    assert history.read_session("claude", "sid-blank")["title"] == "real title"
+
+
+def test_one_unreadable_transcript_does_not_break_the_listing(monkeypatch, tmp_path):
+    claude_root = tmp_path / "claude"
+    _write_jsonl(
+        claude_root / "-home-me-p" / "sid-ok.jsonl",
+        [
+            {
+                "type": "user",
+                "cwd": "/home/me/p",
+                "timestamp": "2025-06-01T10:00:00.000Z",
+                "message": {"role": "user", "content": "fine"},
+            }
+        ],
+    )
+    _write_jsonl(claude_root / "-home-me-p" / "sid-bad.jsonl", [{"type": "user"}])
+    real_summary = history._claude_summary
+
+    def _boom(path):
+        if path.stem == "sid-bad":
+            raise ValueError("corrupt")
+        return real_summary(path)
+
+    monkeypatch.setattr(history, "_claude_summary", _boom)
+    monkeypatch.setattr(history, "CLAUDE_ROOT", claude_root)
+    monkeypatch.setattr(history, "CODEX_ROOT", tmp_path / "none")
+    monkeypatch.setattr(history, "CODEX_INDEX", tmp_path / "none.jsonl")
+    monkeypatch.setattr(history, "COPILOT_ROOT", tmp_path / "none-copilot")
+    sessions = history.list_sessions()
+    assert [s["session_id"] for s in sessions] == ["sid-ok"]
+
+
+def test_skipped_transcript_is_logged(monkeypatch, tmp_path):
+    """The warning must land in the sink the daemon actually configures, so a
+    vanished session is diagnosable in agent.log / CLS — not just on stderr."""
+    from coding_bridge import logs
+
+    claude_root = tmp_path / "claude"
+    _write_jsonl(claude_root / "-home-me-p" / "sid-bad.jsonl", [{"type": "user"}])
+
+    def _boom(path):
+        raise ValueError("corrupt")
+
+    monkeypatch.setattr(history, "_claude_summary", _boom)
+    monkeypatch.setattr(history, "CLAUDE_ROOT", claude_root)
+    monkeypatch.setattr(history, "CODEX_ROOT", tmp_path / "none")
+    monkeypatch.setattr(history, "CODEX_INDEX", tmp_path / "none.jsonl")
+    monkeypatch.setattr(history, "COPILOT_ROOT", tmp_path / "none-copilot")
+
+    # `logs.setup` is idempotent, so an earlier test's handlers would make it
+    # skip creating ours. Swap the package logger's handlers out for the call.
+    root = logging.getLogger(logs.ROOT_LOGGER)
+    saved = list(root.handlers)
+    root.handlers = []
+    try:
+        log_path = logs.setup("DEBUG", tmp_path / "logs")
+        assert history.list_sessions() == []
+        assert "sid-bad" in log_path.read_text(encoding="utf-8")
+    finally:
+        for handler in root.handlers:
+            handler.close()
+        root.handlers = saved
+
+
+def test_provider_titles_are_sanitised(monkeypatch, tmp_path):
+    """Provider-written titles are third-party data: cap and strip them, and
+    never let a non-str reach the browser."""
+    codex_root = tmp_path / "codex"
+    codex_index = tmp_path / "codex_index.jsonl"
+    copilot_root = tmp_path / "copilot"
+    _seed_codex(codex_root, codex_index)
+    _seed_copilot(copilot_root)
+    long_name = "标题" * 100
+    codex_index.write_text(
+        json.dumps(
+            {
+                "id": CODEX_SID,
+                "thread_name": f"<b>{long_name}</b>",
+                "updated_at": "2025-06-02T09:10:00.000Z",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (copilot_root / COPILOT_SID / "workspace.yaml").write_text(
+        f"id: {COPILOT_SID}\ncwd: /home/me/copilot\nname: {long_name}\n", encoding="utf-8"
+    )
+    monkeypatch.setattr(history, "CLAUDE_ROOT", tmp_path / "none-claude")
+    monkeypatch.setattr(history, "CODEX_ROOT", codex_root)
+    monkeypatch.setattr(history, "CODEX_INDEX", codex_index)
+    monkeypatch.setattr(history, "COPILOT_ROOT", copilot_root)
+    by_provider = {s["provider"]: s for s in history.list_sessions()}
+    assert len(by_provider["codex"]["title"]) == 80
+    assert "<b>" not in by_provider["codex"]["title"]
+    assert len(by_provider["copilot"]["title"]) == 80
+    assert history.read_session("codex", CODEX_SID)["title"] == by_provider["codex"]["title"]
+    assert history.read_session("copilot", COPILOT_SID)["title"] == by_provider["copilot"]["title"]
+
+
+def test_non_string_provider_title_falls_back(monkeypatch, tmp_path):
+    codex_root = tmp_path / "codex"
+    codex_index = tmp_path / "codex_index.jsonl"
+    _seed_codex(codex_root, codex_index)
+    codex_index.write_text(
+        json.dumps({"id": CODEX_SID, "thread_name": {"text": "wrong type"}}) + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(history, "CLAUDE_ROOT", tmp_path / "none-claude")
+    monkeypatch.setattr(history, "CODEX_ROOT", codex_root)
+    monkeypatch.setattr(history, "CODEX_INDEX", codex_index)
+    monkeypatch.setattr(history, "COPILOT_ROOT", tmp_path / "none-copilot")
+    codex = next(s for s in history.list_sessions() if s["provider"] == "codex")
+    assert codex["title"] == "build me a thing"  # falls back to the first prompt
+    assert history.read_session("codex", CODEX_SID)["title"] == "build me a thing"
 
 
 def test_codex_skips_injected_context_for_title(monkeypatch, tmp_path):

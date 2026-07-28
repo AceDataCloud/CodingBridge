@@ -13,6 +13,7 @@ depends only on the standard library.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 from collections.abc import Callable, Iterator
@@ -20,6 +21,8 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+
+_log = logging.getLogger("coding-bridge.history")
 
 # Module-level roots so tests can point them at fixtures via monkeypatch.
 CLAUDE_ROOT = Path.home() / ".claude" / "projects"
@@ -134,15 +137,19 @@ def read_session(provider: str, session_id: str) -> dict[str, Any]:
 
 # Summarising a transcript reads the whole file, so listing many sessions is
 # dominated by per-file IO. Fan the reads out across a small thread pool (the
-# reads release the GIL); order and OSError-skipping match the old serial loop.
+# reads release the GIL); order matches the old serial loop.
 def _summaries(paths: list[Path], parse: Callable[[Path], dict[str, Any]]) -> list[dict[str, Any]]:
     if not paths:
         return []
 
     def _one(path: Path) -> dict[str, Any] | None:
+        # Skip the one unreadable/unexpected transcript rather than failing the
+        # whole listing — these files are written by third-party CLIs. Logged so
+        # a silently-vanishing session is still diagnosable.
         try:
             return parse(path)
-        except OSError:
+        except Exception:
+            _log.warning("skipping unreadable transcript: %s", path, exc_info=True)
             return None
 
     with ThreadPoolExecutor(max_workers=min(8, len(paths))) as pool:
@@ -162,6 +169,7 @@ def _claude_summary(path: Path) -> dict[str, Any]:
     cwd: str | None = None
     git: str | None = None
     title = ""
+    ai_title = ""
     count = 0
     for rec in _iter_jsonl(path):
         if cwd is None and isinstance(rec.get("cwd"), str):
@@ -169,6 +177,9 @@ def _claude_summary(path: Path) -> dict[str, Any]:
         if git is None and isinstance(rec.get("gitBranch"), str):
             git = rec["gitBranch"]
         kind = rec.get("type")
+        if kind == "ai-title":
+            ai_title = _claude_ai_title(rec) or ai_title
+            continue
         msg = rec.get("message")
         if kind in ("user", "assistant") and isinstance(msg, dict):
             count += 1
@@ -179,7 +190,7 @@ def _claude_summary(path: Path) -> dict[str, Any]:
     return {
         "provider": "claude",
         "session_id": path.stem,
-        "title": title or "(no prompt)",
+        "title": ai_title or title or "(no prompt)",
         "cwd": cwd,
         "git_branch": git,
         "updated_at": _mtime_ms(path),
@@ -189,6 +200,7 @@ def _claude_summary(path: Path) -> dict[str, Any]:
 
 def _claude_read(path: Path) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     header: dict[str, Any] = {"cwd": None, "git_branch": None, "model": None, "title": ""}
+    ai_title = ""
     events: list[dict[str, Any]] = []
     for rec in _iter_jsonl(path):
         ts = _iso_ms(rec.get("timestamp"))
@@ -197,6 +209,9 @@ def _claude_read(path: Path) -> tuple[dict[str, Any], list[dict[str, Any]]]:
         if header["git_branch"] is None and isinstance(rec.get("gitBranch"), str):
             header["git_branch"] = rec["gitBranch"]
         kind = rec.get("type")
+        if kind == "ai-title":
+            ai_title = _claude_ai_title(rec) or ai_title
+            continue
         msg = rec.get("message")
         if not isinstance(msg, dict):
             continue
@@ -207,7 +222,14 @@ def _claude_read(path: Path) -> tuple[dict[str, Any], list[dict[str, Any]]]:
             _claude_user_events(content, ts, events, header)
         elif kind == "assistant":
             _claude_assistant_events(content, ts, events)
+    if ai_title:
+        header["title"] = ai_title
     return header, events
+
+
+def _claude_ai_title(rec: dict[str, Any]) -> str:
+    """Claude Code's own session title, re-emitted as it gets refined."""
+    return _provider_title(rec.get("aiTitle"))
 
 
 def _claude_user_events(
@@ -318,7 +340,7 @@ def _codex_summary(path: Path, index: dict[str, dict[str, Any]]) -> dict[str, An
     return {
         "provider": "codex",
         "session_id": sid,
-        "title": meta.get("thread_name") or title or "(no prompt)",
+        "title": _provider_title(meta.get("thread_name")) or title or "(no prompt)",
         "cwd": cwd,
         "git_branch": git,
         "updated_at": _iso_ms(meta.get("updated_at")) or _mtime_ms(path),
@@ -348,9 +370,10 @@ def _codex_read(
         if ptype != "response_item":
             continue
         _codex_response_event(payload, ts, events, header)
-    if not header["title"]:
-        meta = index.get(sid or _codex_sid_from_name(path), {})
-        header["title"] = meta.get("thread_name") or ""
+    meta = index.get(sid or _codex_sid_from_name(path), {})
+    # The provider's own thread name wins over the first prompt, and must match
+    # what `_codex_summary` puts in the list.
+    header["title"] = _provider_title(meta.get("thread_name")) or header["title"] or ""
     return header, events
 
 
@@ -498,7 +521,7 @@ def _copilot_summary(path: Path) -> dict[str, Any]:
     return {
         "provider": "copilot",
         "session_id": path.parent.name,
-        "title": meta.get("name") or title or "(no prompt)",
+        "title": _provider_title(meta.get("name")) or title or "(no prompt)",
         "cwd": cwd,
         "git_branch": None,
         "updated_at": updated_at,
@@ -512,7 +535,7 @@ def _copilot_read(path: Path) -> tuple[dict[str, Any], list[dict[str, Any]]]:
         "cwd": meta.get("cwd"),
         "git_branch": None,
         "model": None,
-        "title": meta.get("name") or "",
+        "title": _provider_title(meta.get("name")),
     }
     events: list[dict[str, Any]] = []
     for rec in _iter_jsonl(path):
@@ -660,6 +683,12 @@ def _clean_title(text: str) -> str:
         return ""
     stripped = " ".join(_TAG_RE.sub(" ", text).split())
     return stripped[:_TITLE_MAX]
+
+
+def _provider_title(value: Any) -> str:
+    """Sanitise a title the provider wrote — third-party CLIs own these files,
+    so the type is not ours to assume and the text can be arbitrarily long."""
+    return _clean_title(value) if isinstance(value, str) else ""
 
 
 # Tool-injected context messages that are not real user prompts: Codex AGENTS.md

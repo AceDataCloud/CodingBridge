@@ -1,5 +1,6 @@
 import asyncio
 import json
+from types import SimpleNamespace
 
 from coding_bridge import protocol
 from coding_bridge.config import Settings
@@ -507,4 +508,146 @@ async def test_history_list_flags_only_actively_running_session(monkeypatch):
     assert by_id == {"live-1": True, "other": False}
     gate.set()  # let the hung turn finish so the test tears down cleanly
     await asyncio.sleep(0.01)
+
+
+# --- Unread watermark --------------------------------------------------------
+def _reads_conn(tmp_path):
+    settings = Settings(
+        bridge_url="https://bridge.test", permission_timeout=0.2, config_dir=tmp_path
+    )
+    conn = BridgeConnection(settings, "node_tok", provider_factory=fake_factory)
+    conn._ws = FakeWS()
+    return conn
+
+
+def _snapshot(conn):
+    return next(
+        m["payload"] for m in conn._ws.sent if m["payload"].get("event") == Event.HISTORY_SNAPSHOT
+    )
+
+
+def _stub_history(monkeypatch, updated_at, seen=None):
+    from coding_bridge import history
+
+    if seen is not None:
+        seen.clear()
+
+    def _list(limit=200):
+        if seen is not None:
+            seen.append(limit)
+        return [{"provider": "claude", "session_id": "s1", "updated_at": updated_at}]
+
+    monkeypatch.setattr(history, "list_sessions", _list)
+
+
+async def test_history_list_flags_unread_after_baseline(tmp_path, monkeypatch):
+    from coding_bridge import reads
+
+    conn = _reads_conn(tmp_path)
+    monkeypatch.setattr(reads, "_now_ms", lambda: 1_000_000)
+    # Finished after the baseline seeded on first use → genuinely new to the user.
+    _stub_history(monkeypatch, 1_500_000)
+    await conn._dispatch({"action": Action.HISTORY_LIST})
+    assert _snapshot(conn)["sessions"][0]["unread"] is True
+
+
+async def test_mark_read_clears_unread_and_resends_snapshot(tmp_path, monkeypatch):
+    import json
+
+    from coding_bridge import reads
+
+    conn = _reads_conn(tmp_path)
+    monkeypatch.setattr(reads, "_now_ms", lambda: 2_000_000)
+    _stub_history(monkeypatch, 1_500_000)
+    await conn._dispatch(
+        {
+            "action": Action.HISTORY_MARK_READ,
+            "provider": "claude",
+            "session_id": "s1",
+            "updated_at": 1_500_000,
+        }
+    )
+    # Marking replies with a refreshed listing, so the browser needs no new branch.
+    assert _snapshot(conn)["sessions"][0]["unread"] is False
+    marks = json.loads((tmp_path / "reads.json").read_text())["reads"]
+    assert marks == {"claude:s1": 1_500_000}
+
+
+async def test_mark_read_forwards_the_drawer_limit(tmp_path, monkeypatch):
+    """A paginated drawer must not shrink to the default after one tap."""
+    conn = _reads_conn(tmp_path)
+    limits: list[int] = []
+    _stub_history(monkeypatch, 1_500_000, seen=limits)
+    await conn._dispatch(
+        {
+            "action": Action.HISTORY_MARK_READ,
+            "provider": "claude",
+            "session_id": "s1",
+            "limit": 1000,
+        }
+    )
+    assert limits == [1000]
+
+
+async def test_mark_read_falls_back_to_the_transcripts_own_timestamp(tmp_path, monkeypatch):
+    """No client updated_at → use the listing's, so a future mtime is still clearable."""
+    import json
+
+    from coding_bridge import reads
+
+    conn = _reads_conn(tmp_path)
+    monkeypatch.setattr(reads, "_now_ms", lambda: 1_000_000)
+    future = 9_000_000  # a restored backup / skewed clock leaves mtime ahead of us
+    _stub_history(monkeypatch, future)
+    await conn._dispatch(
+        {"action": Action.HISTORY_MARK_READ, "provider": "claude", "session_id": "s1"}
+    )
+    assert _snapshot(conn)["sessions"][0]["unread"] is False
+    assert json.loads((tmp_path / "reads.json").read_text())["reads"]["claude:s1"] == future
+
+
+async def test_running_flag_does_not_cross_providers(tmp_path, monkeypatch):
+    """A live codex session must not mark a same-id claude transcript running."""
+    from coding_bridge import history
+
+    conn = _reads_conn(tmp_path)
+    conn.sessions["dup"] = SimpleNamespace(status="running", provider="codex")
+    monkeypatch.setattr(
+        history,
+        "list_sessions",
+        lambda limit=200: [
+            {"provider": "claude", "session_id": "dup", "updated_at": 1},
+            {"provider": "codex", "session_id": "dup", "updated_at": 1},
+        ],
+    )
+    await conn._dispatch({"action": Action.HISTORY_LIST})
+    flags = {s["provider"]: s["running"] for s in _snapshot(conn)["sessions"]}
+    assert flags == {"claude": False, "codex": True}
+
+
+async def test_mark_read_failure_still_answers_with_a_snapshot(tmp_path, monkeypatch):
+    """A cosmetic failure must not emit a durable, forever-replayed session error."""
+    conn = _reads_conn(tmp_path)
+    _stub_history(monkeypatch, 1_500_000)
+    # No provider → the watermark write raises; the listing must still come back.
+    await conn._dispatch({"action": Action.HISTORY_MARK_READ, "session_id": "s1"})
+    assert Event.SESSION_ERROR not in _events(conn)
+    assert _snapshot(conn)["sessions"][0]["session_id"] == "s1"
+    assert len(conn._outbox) == 0
+
+
+async def test_history_list_survives_a_broken_watermark_file(tmp_path, monkeypatch):
+    """A cosmetic sidecar must never turn the listing into an error."""
+    from coding_bridge import reads
+
+    conn = _reads_conn(tmp_path)
+    _stub_history(monkeypatch, 1_500_000)
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("sidecar exploded")
+
+    monkeypatch.setattr(reads, "annotate", boom)
+    await conn._dispatch({"action": Action.HISTORY_LIST})
+    assert _snapshot(conn)["sessions"][0]["session_id"] == "s1"
+    assert Event.SESSION_ERROR not in _events(conn)
 

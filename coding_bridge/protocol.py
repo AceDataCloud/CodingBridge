@@ -66,6 +66,9 @@ class Action:
     SESSIONS_LIST = "sessions.list"
     HISTORY_LIST = "history.list"
     HISTORY_GET = "history.get"
+    # Mark a history session read up to now. The read watermark lives on the node
+    # so "I already read this on my phone" holds on every other device too.
+    HISTORY_MARK_READ = "history.mark_read"
     FS_LIST = "fs.list"
     CAPABILITIES_GET = "capabilities.get"
     PING = "ping"

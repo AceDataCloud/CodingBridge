@@ -12,3 +12,14 @@ def _no_codex_stream_delay(monkeypatch):
     from coding_bridge.providers import codex
 
     monkeypatch.setattr(codex, "STREAM_DELAY", 0, raising=False)
+
+
+@pytest.fixture(autouse=True)
+def _isolate_home(tmp_path_factory, monkeypatch):
+    """Redirect ``~`` so sidecars never touch the developer's real ~/.ace-bridge.
+
+    Deliberately not under ``tmp_path`` — tests that list ``tmp_path`` would see it.
+    """
+    home = tmp_path_factory.mktemp("home")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))

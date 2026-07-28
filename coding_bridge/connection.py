@@ -14,7 +14,7 @@ from collections import deque
 
 import websockets
 
-from . import capabilities, fs, history, logs, protocol, session_meta
+from . import capabilities, fs, history, logs, protocol, reads, session_meta
 from .config import Settings
 from .protocol import Action, Event, event_payload
 from .providers import KNOWN_PROVIDERS, default_provider_factory
@@ -286,6 +286,8 @@ class BridgeConnection:
                 await self._send_history_list(payload)
             elif action == Action.HISTORY_GET:
                 await self._send_history_detail(payload)
+            elif action == Action.HISTORY_MARK_READ:
+                await self._mark_history_read(payload)
             elif action == Action.FS_LIST:
                 await self._send_fs_list(payload)
             elif action == Action.CAPABILITIES_GET:
@@ -466,6 +468,10 @@ class BridgeConnection:
         await self.send_payload(event_payload(Event.PERMISSIONS_SNAPSHOT, requests=requests))
 
     async def _send_history_list(self, payload: dict) -> None:
+        sessions = await self._history_sessions(payload)
+        await self._emit_history(sessions)
+
+    async def _history_sessions(self, payload: dict) -> list[dict]:
         limit = payload.get("limit") or 200
         sessions = await asyncio.to_thread(history.list_sessions, limit)
         # Flag transcripts whose session is actively executing a turn right now, so
@@ -473,10 +479,53 @@ class BridgeConnection:
         # stays in the registry (it's still reattachable), but it is idle, not
         # running, so it must not be flagged — that's what made every in-memory
         # session look "running". Reattach keys off registry membership separately.
-        running = {sid for sid, s in self.sessions.items() if s.status == "running"}
+        # Keyed by (provider, session_id): two providers can mint the same local id,
+        # and a running Codex session must not mark a Claude transcript live.
+        running = {(s.provider, sid) for sid, s in self.sessions.items() if s.status == "running"}
         for summary in sessions:
-            summary["running"] = summary.get("session_id") in running
+            summary["running"] = (summary.get("provider"), summary.get("session_id")) in running
+        return sessions
+
+    async def _emit_history(self, sessions: list[dict]) -> None:
+        try:
+            reads.annotate(self.settings.config_dir, sessions)
+        except Exception as exc:  # noqa: BLE001 - a cosmetic dot must not kill the listing
+            logger.warning("unread annotation failed: %s", exc)
         await self.send_payload(event_payload(Event.HISTORY_SNAPSHOT, sessions=sessions))
+
+    async def _mark_history_read(self, payload: dict) -> None:
+        """Raise the read watermark for one session, then re-send the listing.
+
+        The watermark lives on the node, so reading a session on the phone also
+        clears it on the desktop. Replying with a fresh HISTORY_SNAPSHOT (an
+        ephemeral event) means no new event type and no new browser branch. The
+        payload is forwarded as-is, so a paginated drawer must echo its ``limit``.
+        """
+        provider = payload.get("provider")
+        session_id = payload.get("session_id")
+        # One scan serves both the watermark and the reply. The listing also
+        # supplies updated_at when the client omits it, so the watermark is always
+        # the transcript's own timestamp — a wall clock behind a restored file's
+        # mtime would leave the dot permanently unclearable.
+        sessions = await self._history_sessions(payload)
+        seen = payload.get("updated_at") or next(
+            (
+                s.get("updated_at")
+                for s in sessions
+                if s.get("provider") == provider and s.get("session_id") == session_id
+            ),
+            None,
+        )
+        try:
+            await asyncio.to_thread(
+                reads.mark, self.settings.config_dir, provider, session_id, seen
+            )
+        except Exception as exc:  # noqa: BLE001 - see below
+            # Handled here rather than raised: the generic dispatch handler emits a
+            # session-scoped error, which is durable and would replay on every
+            # reconnect forever for something purely cosmetic.
+            logger.warning("mark_read failed: %s", exc)
+        await self._emit_history(sessions)
 
     async def _send_history_detail(self, payload: dict) -> None:
         provider = payload.get("provider")

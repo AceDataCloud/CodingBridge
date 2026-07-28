@@ -66,6 +66,44 @@ connected to bridge as node node_XXXXXXX
 registered with bridge
 ```
 
+## Upgrading
+
+Upgrading the package leaves the running service on the **old** code — it keeps
+executing the interpreter the unit file names until you restart it.
+
+With Homebrew it's worse than stale: the unit bakes in a *versioned* Cellar path
+(`/opt/homebrew/Cellar/coding-bridge/<version>/libexec/bin/python`), which the
+upgrade deletes. pipx and uv venv paths don't carry the version, so they survive
+an upgrade — but still need the restart.
+
+After any upgrade:
+
+```bash
+coding-bridge service stop
+coding-bridge service install --force
+```
+
+Stop first, then reinstall. There is no `service restart`, and `install
+--force` on its own only restarts the daemon on macOS — on Linux it runs
+`systemctl --user enable --now`, which leaves an already-active unit running the
+old code, and on Windows `schtasks /run` collides with the instance still
+holding the lock. `install --force` is still the step that rewrites the unit
+with the new interpreter path, so both halves are needed. If you run the daemon
+through `brew services` instead, `brew services restart coding-bridge` covers
+it.
+
+A stale unit fails *silently* — the manager keeps relaunching a binary that
+isn't there:
+
+```bash
+launchctl print gui/$UID/cloud.acedata.coding-bridge | grep -E 'runs|exit code'
+#   runs = 9562
+#   last exit code = 78: EX_CONFIG     <- the baked interpreter path is gone
+```
+
+On Linux the equivalent is `systemctl --user status coding-bridge.service`
+showing repeated `status=203/EXEC`.
+
 ## Notes and troubleshooting
 
 - **It runs as *you*, never as root/SYSTEM.** That's deliberate: the daemon

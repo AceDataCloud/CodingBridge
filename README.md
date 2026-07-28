@@ -30,7 +30,48 @@ On Windows without Scoop or pipx, use the Python launcher:
 Check it landed:
 
 ```bash
-coding-bridge status
+coding-bridge --version
+```
+
+## Upgrade
+
+Releases are date-versioned (`2026.7.28.0`). Upgrade with the same tool you
+installed with:
+
+| | Command |
+| --- | --- |
+| **pipx** | `pipx upgrade coding-bridge` |
+| **pip** | `pip install --upgrade coding-bridge` |
+| **Homebrew** | `brew update && brew upgrade coding-bridge` |
+| **Scoop** | `scoop update coding-bridge` |
+| **uv** | `uv tool upgrade coding-bridge` |
+| **Windows (py)** | `py -m pip install --user --upgrade coding-bridge` |
+
+Confirm with `coding-bridge --version` (or `coding-bridge status`, which now
+prints it too).
+
+**A running daemon keeps the old code until you restart it** — upgrading the
+package doesn't touch the service:
+
+```bash
+coding-bridge service stop
+coding-bridge service install --force    # rewrite the unit with the new paths
+```
+
+Stop first, then reinstall — there is no `service restart`, and `install
+--force` alone only restarts the daemon on macOS. Reinstalling also matters on
+Homebrew, where the unit file names a *versioned* Cellar interpreter path that
+the upgrade deletes; a stale unit then fails silently in a relaunch loop
+(`launchctl print gui/$UID/cloud.acedata.coding-bridge` shows `last exit code =
+78`). If you start the daemon via `brew services` instead,
+`brew services restart coding-bridge` is enough.
+
+If `brew upgrade` insists an old version is `already installed`, the local tap
+clone is stuck; re-tap and retry:
+
+```bash
+brew untap acedatacloud/tap && brew tap acedatacloud/tap
+brew upgrade coding-bridge
 ```
 
 ## Setup
@@ -160,14 +201,15 @@ Commands:
 | `up` | Pair if needed, then run (default if no command given) |
 | `pair` | Pair this machine and exit |
 | `run` | Run using stored credentials (errors if not paired) |
-| `status` | Show configuration and whether this machine is paired |
+| `status` | Show the installed version, configuration, and whether this machine is paired |
 | `logout` | Remove stored credentials |
 | `service` | Manage the daemon as a background OS service — [docs](https://github.com/AceDataCloud/CodingBridge/blob/main/docs/service.md) |
 | `channels` | Drive the daemon from WeChat / Telegram — [docs](https://github.com/AceDataCloud/CodingBridge/blob/main/docs/channels.md) |
 
 Run flags (`up` / `run`): `--model`, `--cwd`, `--permission-timeout`,
 `--claude-path`, `--codex-path`, `--copilot-path`.
-Global flags: `--bridge-url`, `--name`, `--config-dir`.
+Global flags: `--bridge-url`, `--name`, `--config-dir`. `coding-bridge --version`
+prints the installed release.
 
 Environment (see [.env.example](https://github.com/AceDataCloud/CodingBridge/blob/main/.env.example)) — CLI flags win:
 

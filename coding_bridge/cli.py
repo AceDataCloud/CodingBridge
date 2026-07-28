@@ -7,7 +7,7 @@ import logging
 import sys
 from pathlib import Path
 
-from . import capabilities, logs, store
+from . import __version__, capabilities, logs, store
 from .config import Settings
 from .connection import BridgeConnection
 from .locking import AlreadyRunning, SingleInstance
@@ -157,6 +157,7 @@ def cmd_status(args: argparse.Namespace) -> None:
     settings = _build_settings(args)
     creds = store.load(settings.credentials_path)
     paired = bool(creds and creds.get("node_token"))
+    print(f"Version    : {__version__}")
     print(f"Bridge URL : {settings.bridge_url}")
     print(f"Node name  : {settings.node_name}")
     print(f"Config dir : {settings.config_dir}")
@@ -221,6 +222,7 @@ def main(argv: list[str] | None = None) -> None:
         description="Run Claude Code on this machine, driven from the AceDataCloud web app.",
         parents=[common],
     )
+    parser.add_argument("--version", action="version", version=f"coding-bridge {__version__}")
     parser.set_defaults(func=cmd_up)
 
     sub = parser.add_subparsers(dest="command")

@@ -221,6 +221,7 @@ Environment (see [.env.example](https://github.com/AceDataCloud/CodingBridge/blo
 | `CODING_BRIDGE_HEARTBEAT_INTERVAL` | `15` | Heartbeat seconds |
 | `CODING_BRIDGE_PERMISSION_TIMEOUT` | `1800` | Permission wait seconds (`0` = forever) |
 | `CODING_BRIDGE_MODEL` | — | Default model |
+| `CODING_BRIDGE_CLAUDE_ENTRYPOINT` | `claude-vscode` | Entrypoint stamped on Claude transcripts. The default keeps bridge sessions listed in the VSCode extension and `claude --resume`; `sdk-py` hides them there |
 | `CODING_BRIDGE_CLAIM_URL` | `https://studio.acedata.cloud/coding-bridge?code={code}` | Pairing claim link template |
 
 Optional extras: `coding-bridge[qr]` for the ASCII-QR pairing helper;

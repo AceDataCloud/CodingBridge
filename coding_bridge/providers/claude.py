@@ -232,6 +232,13 @@ class ClaudeProvider:
             setting_sources=["user", "project", "local"],
             resume=resume or None,
         )
+        # The SDK stamps CLAUDE_CODE_ENTRYPOINT=sdk-py, which both the VSCode
+        # extension and `claude --resume` treat as "programmatic" and hide from
+        # their pickers. options.env is merged after that default, so this is
+        # what makes bridge sessions visible alongside hand-started ones.
+        entrypoint = (self._settings.claude_entrypoint or "").strip()
+        if entrypoint:
+            options.env = {**(options.env or {}), "CLAUDE_CODE_ENTRYPOINT": entrypoint}
         # Fork on resume so editing a prompt branches a NEW session and leaves
         # the original transcript intact (mirrors `claude --fork-session`).
         if fork_session and hasattr(options, "fork_session"):

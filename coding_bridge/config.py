@@ -10,6 +10,14 @@ DEFAULT_BRIDGE_URL = "https://coding-bridge.acedata.cloud"
 DEFAULT_CONFIG_DIR = "~/.ace-bridge"
 DEFAULT_CLAIM_URL = "https://studio.acedata.cloud/coding-bridge?code={code}"
 
+# Both the VSCode extension and `claude --resume` hide sessions whose transcript
+# carries a programmatic entrypoint ("sdk-py"/"sdk-ts"/"sdk-cli") — which is what
+# claude-agent-sdk stamps by default, so bridge sessions never showed up in either
+# picker. "claude-vscode" is the one value that survives: the CLI rewrites "cli"
+# back to "sdk-cli" when stdout isn't a TTY. Set CODING_BRIDGE_CLAUDE_ENTRYPOINT
+# to "sdk-py" to restore the old, hidden behaviour.
+DEFAULT_CLAUDE_ENTRYPOINT = "claude-vscode"
+
 
 def _default_node_name() -> str:
     try:
@@ -60,6 +68,8 @@ class Settings:
     outbox_max: int = 5000  # max buffered node→browser events while disconnected
     default_cwd: str = ""
     default_model: str | None = None
+    # Entrypoint stamped on claude transcripts; drives session-picker visibility.
+    claude_entrypoint: str = DEFAULT_CLAUDE_ENTRYPOINT
     # Explicit paths to the provider CLIs, for nodes whose daemon PATH can't see
     # them (nvm/volta/.local installs). Empty → auto-resolve (PATH + known dirs).
     claude_path: str | None = None
@@ -126,6 +136,9 @@ class Settings:
             turn_retry_backoff=_f("CODING_BRIDGE_TURN_RETRY_BACKOFF", 0.5),
             outbox_max=int(_f("CODING_BRIDGE_OUTBOX_MAX", 5000)),
             default_model=os.environ.get("CODING_BRIDGE_MODEL") or None,
+            claude_entrypoint=(
+                os.environ.get("CODING_BRIDGE_CLAUDE_ENTRYPOINT") or DEFAULT_CLAUDE_ENTRYPOINT
+            ),
             claude_path=os.environ.get("CODING_BRIDGE_CLAUDE_PATH") or None,
             codex_path=os.environ.get("CODING_BRIDGE_CODEX_PATH") or None,
             copilot_path=os.environ.get("CODING_BRIDGE_COPILOT_PATH") or None,

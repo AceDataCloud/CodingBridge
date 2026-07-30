@@ -132,8 +132,12 @@ class BridgeConnection:
         except (asyncio.CancelledError, websockets.exceptions.ConnectionClosed):
             return
 
-    async def _send_envelope(self, env: dict) -> None:
+    async def _send_envelope(self, env: dict) -> bool:
         """Transmit one envelope if connected; a no-op (drop) while offline.
+
+        Returns whether it actually went out, so callers holding state that only
+        the browser can recover (the truncation warning) can keep it for the next
+        connect instead of discarding it into a dead socket.
 
         Heartbeats and logs use this directly — losing them across a reconnect is
         harmless. Durable browser events go through :meth:`send_payload`, which
@@ -141,11 +145,14 @@ class BridgeConnection:
         """
         ws = self._ws
         if ws is None:
-            return
+            return False
         # Best-effort: a send racing a socket close must not crash the daemon;
         # durable events remain in the outbox and resend on the next connect.
-        with contextlib.suppress(Exception):  # noqa: BLE001
+        try:
             await ws.send(json.dumps(env))
+        except Exception:  # noqa: BLE001
+            return False
+        return True
 
     async def send_payload(self, payload: dict) -> None:
         """Send an inner event payload toward the owner's browsers.
@@ -167,7 +174,7 @@ class BridgeConnection:
     async def _flush_outbox(self) -> None:
         """On (re)connect, warn about any overflow gap, then resend the outbox."""
         for session_id in list(self._truncated_sessions):
-            await self._send_envelope(
+            delivered = await self._send_envelope(
                 protocol.envelope(
                     protocol.NODE_TO_BROWSER,
                     event_payload(
@@ -179,7 +186,11 @@ class BridgeConnection:
                     from_node=self.node_token,
                 )
             )
-        self._truncated_sessions.clear()
+            # This warning is the browser's only signal that it is missing
+            # events; it carries no seq and is not in the outbox, so dropping it
+            # on a dead socket would silently leave a permanent gap.
+            if delivered:
+                self._truncated_sessions.discard(session_id)
         for env in list(self._outbox):
             await self._send_envelope(env)
 

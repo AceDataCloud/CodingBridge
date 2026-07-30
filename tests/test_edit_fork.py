@@ -67,8 +67,9 @@ def _stub_run(provider, monkeypatch):
         calls.update(kwargs)
         provider._connected = True
 
-    async def fake_turn(prompt):
+    async def fake_turn(prompt, **kwargs):
         calls["prompt"] = prompt
+        calls.update(kwargs)
 
     monkeypatch.setattr(provider, "_ensure_client", fake_ensure)
     monkeypatch.setattr(provider, "_turn", fake_turn)

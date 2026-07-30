@@ -113,6 +113,44 @@ async def test_overflow_drops_oldest_and_warns_on_flush():
     assert not conn._truncated_sessions  # cleared after warning
 
 
+async def test_truncation_warning_survives_a_failed_flush():
+    """The warning must be retried, not lost, when the socket dies mid-flush.
+
+    It carries no node_seq and never enters the outbox, so the browser has no
+    other way to learn it is missing events — dropping it leaves a silent gap.
+    """
+    conn = _conn(outbox_max=2)
+    for i in range(4):
+        await conn.send_payload(event_payload(Event.SESSION_TEXT, "s1", text=str(i)))
+    assert "s1" in conn._truncated_sessions
+
+    class DeadWS:
+        async def send(self, _data):
+            raise ConnectionError("socket closed")
+
+    conn._ws = DeadWS()
+    await conn._flush_outbox()
+    assert "s1" in conn._truncated_sessions  # retained for the next connect
+
+    fresh = FakeWS()
+    conn._ws = fresh
+    await conn._flush_outbox()
+    events = [m["payload"]["event"] for m in _node_to_browser(fresh)]
+    assert events[0] == Event.SESSION_STREAM_TRUNCATED
+    assert not conn._truncated_sessions
+
+
+async def test_truncation_warning_is_not_lost_while_offline():
+    """No socket at all is the same gap: keep the warning until one exists."""
+    conn = _conn(outbox_max=2)
+    for i in range(4):
+        await conn.send_payload(event_payload(Event.SESSION_TEXT, "s1", text=str(i)))
+
+    conn._ws = None
+    await conn._flush_outbox()
+    assert "s1" in conn._truncated_sessions
+
+
 async def test_duplicate_command_is_executed_once():
     conn = _conn()
     started = []

@@ -68,7 +68,9 @@ class ClaudeProvider:
         # Announced the real id to the browser yet? Once known we re-tag events
         # with it and emit session.identified so the registry/browser re-key.
         self._announced_identity = False
-        # Resume-replay guard (first resumed turn only); see _gated_receive.
+        # Replay guard, re-armed before every turn from the transcript watermark
+        # (see _arm_replay_guard). Anything reusing an id that already existed
+        # when the turn started is replayed output, never this turn's.
         self._gate_active = False
         self._gate_uuids: set[str] = set()
         self._gate_msg_ids: set[str] = set()
@@ -92,25 +94,33 @@ class ClaudeProvider:
         self._cwd = cwd or self._settings.default_cwd
         self._model = model
         self._permission_mode = permission_mode or "default"
-        self._arm_resume_guard(resume)
         await self._ensure_client(
             cwd=cwd, model=model, permission_mode=permission_mode, effort=effort, resume=resume
         )
         if await self._maybe_handle_slash(prompt):
             return
-        await self._turn(self._with_attachments(prompt, images, attachments))
+        await self._turn(self._with_attachments(prompt, images, attachments), resume_of=resume)
 
-    def _arm_resume_guard(self, resume: str | None) -> None:
-        """Load the resumed transcript's ids so the first turn can drop a replay."""
+    def _arm_replay_guard(self, session_id: str | None) -> None:
+        """Load the ids that already exist in ``session_id``'s transcript.
+
+        Called before every turn, so a replay is dropped no matter which path
+        spawned the CLI — an explicit ``--resume``, a reconnect after the
+        subprocess died, or any future one. Reading the watermark and the ids in
+        one pass keeps them consistent even if the CLI appends while we read.
+        """
         self._gate_active = False
         self._gate_uuids = set()
         self._gate_msg_ids = set()
-        if not resume:
+        if not session_id:
             return
         from .. import history
 
         with contextlib.suppress(Exception):
-            self._gate_uuids, self._gate_msg_ids = history.claude_known_ids(resume)
+            watermark = history.claude_watermark(session_id)
+            self._gate_uuids, self._gate_msg_ids = history.claude_ids_before(
+                session_id, watermark
+            )
         self._gate_active = bool(self._gate_uuids or self._gate_msg_ids)
 
     async def send(
@@ -124,17 +134,23 @@ class ClaudeProvider:
         permission_mode: str | None = None,
     ) -> None:
         if not self._connected:
+            # The subprocess died mid-conversation. Resume its transcript or the
+            # follow-up loses all context — and the CLI would replay it anyway.
             await self._ensure_client(
-                cwd=self._settings.default_cwd,
-                model=model if model is not None else self._settings.default_model,
-                permission_mode=permission_mode or "default",
+                cwd=self._cwd or self._settings.default_cwd,
+                model=model if model is not None else self._model,
+                permission_mode=permission_mode or self._permission_mode,
                 effort=effort,
+                resume=self._sdk_session_id,
             )
         else:
             await self._apply_runtime_changes(model, permission_mode)
         if await self._maybe_handle_slash(prompt):
             return
-        await self._turn(self._with_attachments(prompt, images, attachments))
+        await self._turn(
+            self._with_attachments(prompt, images, attachments),
+            resume_of=self._sdk_session_id,
+        )
 
     async def edit(
         self,
@@ -169,7 +185,6 @@ class ClaudeProvider:
         fork = bool(cut_uuid and resume_id)
         resume = resume_id if fork else None
         extra: dict[str, str | None] | None = {"resume-session-at": cut_uuid} if fork else None
-        self._arm_resume_guard(resume)
         await self._ensure_client(
             cwd=self._cwd,
             model=model,
@@ -181,7 +196,7 @@ class ClaudeProvider:
         )
         if await self._maybe_handle_slash(prompt):
             return
-        await self._turn(self._with_attachments(prompt, images, attachments))
+        await self._turn(self._with_attachments(prompt, images, attachments), resume_of=resume)
 
     async def _apply_runtime_changes(
         self, model: str | None, permission_mode: str | None
@@ -290,7 +305,10 @@ class ClaudeProvider:
         await self._emit_result_done("notice")
         return True
 
-    async def _turn(self, prompt: str) -> None:
+    async def _turn(self, prompt: str, *, resume_of: str | None = None) -> None:
+        # Snapshot the transcript BEFORE the query so the guard's ids describe
+        # only what predates this turn.
+        self._arm_replay_guard(resume_of or self._sdk_session_id)
         self._begin_stream_turn()
         await self._client.query(prompt)
         if self._gate_active:
@@ -301,27 +319,39 @@ class ClaudeProvider:
         await self._flush_open_text()
 
     async def _gated_receive(self) -> None:
-        """First resumed turn: drop any transcript the CLI replays verbatim.
+        """Drop anything the CLI replays from the transcript this turn started with.
 
-        Some claude CLI versions re-stream the whole resumed conversation (ending
-        in its own result) before processing the new turn. Those replayed messages
-        reuse the transcript's original ids, so we drop them — and swallow the
-        replay's result instead of letting it end the turn — and forward only the
-        genuinely new output. A no-op on CLIs that don't replay (no id matches).
+        Some claude CLI versions re-stream the whole conversation (ending in its
+        own result) before processing the new turn — on an explicit ``--resume``,
+        and again whenever the subprocess is respawned mid-conversation. Those
+        replayed messages reuse the transcript's original ids, so we drop them,
+        swallow the replay's result instead of letting it end the turn, and
+        forward only genuinely new output. A no-op on CLIs that don't replay.
         """
         self._gate_stream_replay = False
         self._gate_saw_replay = False
         self._gate_saw_genuine = False
         self._gate_swallowed_result = False
-        try:
-            async for message in self._client.receive_messages():
-                if await self._gated_handle(message):
-                    break
-        finally:
-            self._gate_active = False
+        async for message in self._client.receive_messages():
+            if await self._gated_handle(message):
+                break
+
+    def _is_replayed(self, message: Any) -> bool:
+        """True when this complete message predates the turn (by uuid or msg id)."""
+        uid = getattr(message, "uuid", None)
+        if isinstance(uid, str) and uid in self._gate_uuids:
+            return True
+        # A replayed message can arrive with uuid=None or a fresh uuid while its
+        # underlying assistant message id is one we already have — check both, or
+        # the whole transcript leaks through as live output.
+        for attr in ("message_id", "id"):
+            mid = getattr(message, attr, None)
+            if isinstance(mid, str) and mid in self._gate_msg_ids:
+                return True
+        return False
 
     async def _gated_handle(self, message: Any) -> bool:
-        """Filter one message during the resumed first turn; True ends the turn."""
+        """Filter one message during a guarded turn; True ends the turn."""
         stream_event = getattr(message, "event", None)
         if isinstance(stream_event, dict):
             if stream_event.get("type") == "message_start":
@@ -337,8 +367,7 @@ class ClaudeProvider:
             return False
         content = getattr(message, "content", None)
         if isinstance(content, list):
-            uid = getattr(message, "uuid", None)
-            if uid and uid in self._gate_uuids:
+            if self._is_replayed(message):
                 self._gate_saw_replay = True
                 return False  # drop a replayed complete message
             self._gate_saw_genuine = True

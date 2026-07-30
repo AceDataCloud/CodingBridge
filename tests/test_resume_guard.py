@@ -41,9 +41,11 @@ class _ToolUseBlock:
 class _Assistant:
     """Complete AssistantMessage carrying the transcript line ``uuid``."""
 
-    def __init__(self, content: list, uuid: str | None):
+    def __init__(self, content: list, uuid: str | None, message_id: str | None = None):
         self.content = content
         self.uuid = uuid
+        if message_id is not None:
+            self.message_id = message_id
 
 
 class _Result:
@@ -166,3 +168,90 @@ async def test_gate_swallows_only_one_replay_result():
     ]
     await _run(provider, messages, uuids={"U_OLD"}, msg_ids=set())
     assert len([e for e in events if e["event"] == "session.result"]) == 1
+
+
+async def test_replayed_message_without_uuid_is_dropped_by_message_id():
+    """A replay whose uuid is absent must still be caught by its message id.
+
+    Observed in production: a whole transcript arrived as complete messages with
+    no matching uuid, so it was forwarded as live output AND — because it looked
+    genuine — the replay's result ended the turn, so the real answer never came.
+    """
+    provider, events = _capturing()
+    messages = [
+        _Assistant([_TextBlock("old one")], uuid=None, message_id="msg_OLD1"),
+        _Assistant(
+            [_ToolUseBlock("Bash", "t_old", {"command": "ls"})],
+            uuid="U_UNSEEN",
+            message_id="msg_OLD2",
+        ),
+        _Result(),  # replay's result — must NOT end the turn
+        _Assistant([_TextBlock("PROBE_OK")], uuid="U_NEW", message_id="msg_NEW"),
+        _Result(),
+    ]
+    await _run(provider, messages, uuids=set(), msg_ids={"msg_OLD1", "msg_OLD2"})
+
+    assert [e["text"] for e in events if e["event"] == "session.text"] == ["PROBE_OK"]
+    assert not [e for e in events if e["event"] == "session.tool_use"]
+    assert len([e for e in events if e["event"] == "session.result"]) == 1
+
+
+async def test_guard_rearms_on_every_turn(monkeypatch, tmp_path):
+    """The guard must protect the 2nd turn too, not just the first resumed one.
+
+    A session stays registered across turns, so a CLI respawned mid-conversation
+    replays into a later turn — which the old first-turn-only guard let through.
+    """
+    from coding_bridge import history
+
+    transcript = tmp_path / "proj" / "sdk-1.jsonl"
+    transcript.parent.mkdir(parents=True)
+    transcript.write_text(
+        '{"type":"assistant","uuid":"U_OLD","message":{"id":"msg_OLD"}}\n', encoding="utf-8"
+    )
+    monkeypatch.setattr(history, "CLAUDE_ROOT", tmp_path)
+
+    provider, events = _capturing()
+    provider._sdk_session_id = "sdk-1"
+    provider._client = _FakeClient(
+        [
+            _Assistant([_TextBlock("old")], uuid="U_OLD"),
+            _Result(),
+            _Assistant([_TextBlock("PROBE_OK")], uuid="U_NEW"),
+            _Result(),
+        ]
+    )
+
+    async def query(_prompt):
+        return None
+
+    provider._client.query = query
+    # A follow-up turn: no explicit resume id is passed, so the guard has to
+    # derive it from the session it is already attached to.
+    await provider._turn("follow-up")
+
+    assert [e["text"] for e in events if e["event"] == "session.text"] == ["PROBE_OK"]
+    assert len([e for e in events if e["event"] == "session.result"]) == 1
+
+
+async def test_watermark_ignores_lines_written_after_the_turn_started(tmp_path, monkeypatch):
+    """Ids appended after the watermark are this turn's, so they must pass."""
+    from coding_bridge import history
+
+    transcript = tmp_path / "proj" / "sdk-2.jsonl"
+    transcript.parent.mkdir(parents=True)
+    transcript.write_text(
+        '{"type":"assistant","uuid":"U_OLD","message":{"id":"msg_OLD"}}\n', encoding="utf-8"
+    )
+    monkeypatch.setattr(history, "CLAUDE_ROOT", tmp_path)
+
+    watermark = history.claude_watermark("sdk-2")
+    assert watermark == 1
+
+    # The turn runs and the CLI appends its output.
+    with open(transcript, "a", encoding="utf-8") as handle:
+        handle.write('{"type":"assistant","uuid":"U_NEW","message":{"id":"msg_NEW"}}\n')
+
+    uuids, msg_ids = history.claude_ids_before("sdk-2", watermark)
+    assert uuids == {"U_OLD"}
+    assert msg_ids == {"msg_OLD"}

@@ -25,7 +25,11 @@ from typing import Any
 _log = logging.getLogger("coding-bridge.history")
 
 # Module-level roots so tests can point them at fixtures via monkeypatch.
-CLAUDE_ROOT = Path.home() / ".claude" / "projects"
+# CLAUDE_CONFIG_DIR is the CLI's own override; honour it or transcripts are
+# invisible to us on any non-default install.
+CLAUDE_ROOT = (
+    Path(os.environ.get("CLAUDE_CONFIG_DIR") or str(Path.home() / ".claude")) / "projects"
+)
 CODEX_ROOT = Path.home() / ".codex" / "sessions"
 CODEX_INDEX = Path.home() / ".codex" / "session_index.jsonl"
 COPILOT_ROOT = (
@@ -52,21 +56,39 @@ def list_sessions(limit: int = 200) -> list[dict[str, Any]]:
     return sessions[:limit]
 
 
-def claude_known_ids(session_id: str) -> tuple[set[str], set[str]]:
-    """Return ``(line_uuids, message_ids)`` already recorded in a claude transcript.
+def claude_watermark(session_id: str) -> int | None:
+    """Return the transcript's current line count, or ``None`` when unreadable.
 
-    Some claude CLI versions re-stream the whole resumed conversation before the
-    new turn when launched with ``--resume``. Those replayed messages carry the
-    transcript's original ids verbatim — the per-line ``uuid`` and the assistant
-    ``message.id`` (``msg_…``). The resume turn matches against these sets to drop
-    the replay and forward only genuinely new output. Empty when no transcript.
+    A turn records this before it runs; every transcript line at or below it
+    already existed, so anything the CLI re-streams from those lines is a replay.
+    Unlike an id set this stays correct when the transcript grows, rotates, or
+    contains messages we never saw.
+    """
+    path = _claude_path(session_id)
+    if path is None:
+        return None
+    try:
+        with open(path, encoding="utf-8") as handle:
+            return sum(1 for line in handle if line.strip())
+    except OSError:
+        return None
+
+
+def claude_ids_before(session_id: str, watermark: int | None) -> tuple[set[str], set[str]]:
+    """Return ``(line_uuids, message_ids)`` from the first ``watermark`` lines.
+
+    These are exactly the ids that existed when the turn started, so a message
+    reusing one is replayed output rather than something the turn produced.
+    ``watermark=None`` reads the whole transcript.
     """
     line_uuids: set[str] = set()
     msg_ids: set[str] = set()
     path = _claude_path(session_id)
     if path is None:
         return line_uuids, msg_ids
-    for rec in _iter_jsonl(path):
+    for index, rec in enumerate(_iter_jsonl(path)):
+        if watermark is not None and index >= watermark:
+            break
         if rec.get("type") not in ("user", "assistant"):
             continue
         uid = rec.get("uuid")

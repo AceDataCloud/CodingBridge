@@ -29,9 +29,14 @@ logger = logging.getLogger("coding-bridge.capabilities")
 # statically (the free-text box still accepts a full model id). Codex is read
 # LIVE from the host instead — see `_codex_models()` — mirroring how Claude's
 # slash commands are read from the host rather than hardcoded.
+# The `[1m]` suffix is the CLI's own opt-in to the 1M-token context beta; without
+# it a long session auto-compacts at ~167k instead of ~830k.
 _CLAUDE_MODELS: list[dict[str, str]] = [
+    {"value": "", "label": "Default (from settings)"},
     {"value": "sonnet", "label": "Claude Sonnet"},
+    {"value": "sonnet[1m]", "label": "Claude Sonnet (1M context)"},
     {"value": "opus", "label": "Claude Opus"},
+    {"value": "opus[1m]", "label": "Claude Opus (1M context)"},
     {"value": "haiku", "label": "Claude Haiku"},
 ]
 

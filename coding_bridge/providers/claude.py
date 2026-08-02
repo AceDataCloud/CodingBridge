@@ -240,7 +240,10 @@ class ClaudeProvider:
             ) from exc
         options = ClaudeAgentOptions(
             cwd=cwd or None,
-            model=model,
+            # Empty means "no --model flag", which lets the CLI apply the user's
+            # own settings.json `model` (e.g. `opus[1m]`). Passing a bare alias
+            # here would override it and drop the 1M context window.
+            model=model or None,
             permission_mode=permission_mode or "default",
             can_use_tool=self._can_use_tool,
             system_prompt={"type": "preset", "preset": "claude_code"},

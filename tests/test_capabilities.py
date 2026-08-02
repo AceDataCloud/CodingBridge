@@ -213,3 +213,12 @@ async def test_describe_detailed_attaches_commands(monkeypatch):
     assert by_name["claude"]["commands"][0]["name"] == "context"
     assert by_name["codex"]["commands"] == []
 
+
+
+def test_claude_offers_the_1m_context_variants():
+    """Without a `[1m]` option the picker can only ever build a 200k session."""
+    desc = capabilities.describe()
+    values = {m["value"] for p in desc["providers"] if p["name"] == "claude" for m in p["models"]}
+    assert {"opus[1m]", "sonnet[1m]"} <= values
+    # "" means "send no --model", so the CLI applies the user's settings.json.
+    assert "" in values

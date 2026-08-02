@@ -651,3 +651,46 @@ async def test_history_list_survives_a_broken_watermark_file(tmp_path, monkeypat
     assert _snapshot(conn)["sessions"][0]["session_id"] == "s1"
     assert Event.SESSION_ERROR not in _events(conn)
 
+
+
+def _detail(conn):
+    return next(
+        m["payload"] for m in conn._ws.sent if m["payload"].get("event") == Event.HISTORY_DETAIL
+    )
+
+
+async def _detail_for(conn, monkeypatch, transcript_model, sidecar_model):
+    """Run history.get with a stubbed transcript + sidecar, return the reply."""
+    from coding_bridge import history, session_meta
+
+    monkeypatch.setattr(
+        history,
+        "read_session",
+        lambda provider, sid: {"provider": provider, "model": transcript_model, "events": []},
+    )
+    if sidecar_model:
+        session_meta.save(conn.settings.config_dir, "s1", provider="claude", model=sidecar_model)
+    await conn._dispatch(
+        {"action": Action.HISTORY_GET, "provider": "claude", "session_id": "s1"}
+    )
+    return _detail(conn)
+
+
+async def test_history_detail_restores_the_1m_context_suffix(tmp_path, monkeypatch):
+    """The transcript logs the resolved id and drops `[1m]`; resuming must not downgrade."""
+    conn = _reads_conn(tmp_path)
+    detail = await _detail_for(conn, monkeypatch, "claude-opus-5", "opus[1m]")
+    assert detail["model"] == "opus[1m]"
+
+
+async def test_history_detail_keeps_the_transcript_model_when_it_differs(tmp_path, monkeypatch):
+    """A genuine mid-session model switch is transcript-authoritative, not sidecar."""
+    conn = _reads_conn(tmp_path)
+    detail = await _detail_for(conn, monkeypatch, "claude-sonnet-4-5", "opus[1m]")
+    assert detail["model"] == "claude-sonnet-4-5"
+
+
+async def test_history_detail_still_backfills_a_missing_model(tmp_path, monkeypatch):
+    conn = _reads_conn(tmp_path)
+    detail = await _detail_for(conn, monkeypatch, None, "opus")
+    assert detail["model"] == "opus"

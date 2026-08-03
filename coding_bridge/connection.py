@@ -551,7 +551,9 @@ class BridgeConnection:
         detail = await asyncio.to_thread(history.read_session, provider, session_id)
         # The transcript carries cwd/model but never effort/permission_mode — fold
         # in the sidecar we saved while the session ran so a resume restores all of
-        # them. cwd/model stay transcript-authoritative; the sidecar only backfills.
+        # them. cwd stays transcript-authoritative; model does too, except that the
+        # transcript records the RESOLVED id (`claude-opus-5`) and drops the `[1m]`
+        # context suffix, so resuming from it would silently downgrade a 1M session.
         meta = session_meta.load(self.settings.config_dir, session_id)
         if meta.get("permission_mode"):
             detail["permission_mode"] = meta["permission_mode"]
@@ -559,7 +561,7 @@ class BridgeConnection:
             detail["effort"] = meta["effort"]
         if not detail.get("cwd") and meta.get("cwd"):
             detail["cwd"] = meta["cwd"]
-        if not detail.get("model") and meta.get("model"):
+        if meta.get("model") and _prefer_sidecar_model(detail.get("model"), meta["model"]):
             detail["model"] = meta["model"]
         await self.send_payload(event_payload(Event.HISTORY_DETAIL, session_id, **detail))
 
@@ -584,6 +586,32 @@ class BridgeConnection:
 def _session_overrides(payload: dict) -> dict:
     """Live-changeable settings a follow-up turn may carry; only pass keys present."""
     return {key: payload[key] for key in ("model", "effort", "permission_mode") if key in payload}
+
+
+def _prefer_sidecar_model(transcript: object, sidecar: str) -> bool:
+    """Should the sidecar's model win over the one read from the transcript?
+
+    Yes when the transcript has none, and yes when the sidecar only adds a
+    context suffix the transcript can't record (`opus[1m]` is logged as
+    `claude-opus-5`) — otherwise resuming a 1M session silently drops it to
+    200k. A genuinely different model still wins from the transcript, which is
+    the authority on what the session last actually ran.
+    """
+    if not transcript or not isinstance(transcript, str):
+        return True
+    if not sidecar.endswith("]") or "[" not in sidecar:
+        return False
+    return _model_family(sidecar) in _model_family(transcript)
+
+
+def _model_family(model: str) -> str:
+    """Strip the `[1m]`-style context suffix and any version tail: opus[1m] -> opus."""
+    base = model.split("[", 1)[0].strip().lower()
+    base = base.removeprefix("claude-")
+    for tier in ("opus", "sonnet", "haiku"):
+        if base.startswith(tier):
+            return tier
+    return base
 
 
 def _is_auth_error(exc: Exception) -> bool:

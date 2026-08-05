@@ -14,7 +14,7 @@ import logging
 from typing import TYPE_CHECKING, Any
 
 from .. import attachments as attachment_store
-from .. import capabilities
+from .. import capabilities, claude_transcript
 from .. import images as image_store
 from ..protocol import Event, event_payload
 from .base import slash_name
@@ -238,6 +238,7 @@ class ClaudeProvider:
             raise RuntimeError(
                 "claude-agent-sdk is not installed; run `pip install claude-agent-sdk`"
             ) from exc
+        resume_id = claude_transcript.prepare_resume(resume) if resume else None
         options = ClaudeAgentOptions(
             cwd=cwd or None,
             # Empty means "no --model flag", which lets the CLI apply the user's
@@ -248,7 +249,7 @@ class ClaudeProvider:
             can_use_tool=self._can_use_tool,
             system_prompt={"type": "preset", "preset": "claude_code"},
             setting_sources=["user", "project", "local"],
-            resume=resume or None,
+            resume=resume_id,
         )
         # The SDK stamps CLAUDE_CODE_ENTRYPOINT=sdk-py, which both the VSCode
         # extension and `claude --resume` treat as "programmatic" and hide from

@@ -46,7 +46,7 @@ def fake_sdk(monkeypatch):
     return module
 
 
-async def _connect(settings, fake_sdk):
+async def _connect(settings, fake_sdk, **kwargs):
     async def emit(_payload):
         return None
 
@@ -56,7 +56,9 @@ async def _connect(settings, fake_sdk):
     provider = ClaudeProvider("s1", emit, ask, settings)
     # _load_server_info would query the stub client; the options are all we assert on.
     provider._load_server_info = lambda: _noop()  # type: ignore[method-assign]
-    await provider._ensure_client(cwd="/tmp", model=None, permission_mode="default")
+    await provider._ensure_client(
+        cwd="/tmp", model=None, permission_mode="default", **kwargs
+    )
     return _FakeClient.last_options
 
 
@@ -69,6 +71,30 @@ async def test_default_entrypoint_is_visible_in_pickers(fake_sdk):
     options = await _connect(Settings(), fake_sdk)
     assert options.env["CLAUDE_CODE_ENTRYPOINT"] == DEFAULT_CLAUDE_ENTRYPOINT
     assert options.env["CLAUDE_CODE_ENTRYPOINT"] not in {"sdk-py", "sdk-ts", "sdk-cli"}
+
+
+async def test_resume_uses_compatibility_repair(fake_sdk, monkeypatch):
+    monkeypatch.setattr(
+        "coding_bridge.providers.claude.claude_transcript.prepare_resume",
+        lambda session_id: "77777777-7777-7777-7777-777777777777",
+    )
+
+    options = await _connect(Settings(), fake_sdk, resume="legacy-session")
+
+    assert options.resume == "77777777-7777-7777-7777-777777777777"
+
+
+async def test_fresh_session_skips_compatibility_repair(fake_sdk, monkeypatch):
+    def fail(_session_id):
+        raise AssertionError("fresh sessions must not inspect transcripts")
+
+    monkeypatch.setattr(
+        "coding_bridge.providers.claude.claude_transcript.prepare_resume", fail
+    )
+
+    options = await _connect(Settings(), fake_sdk)
+
+    assert options.resume is None
 
 
 async def test_entrypoint_is_overridable(fake_sdk):

@@ -320,11 +320,15 @@ def _claude_assistant_events(content: Any, ts: int | None, events: list[dict[str
             )
 
 
-def _claude_path(session_id: str) -> Path | None:
+def claude_path(session_id: str) -> Path | None:
+    """Return the newest transcript matching a safe Claude session id."""
     if not _safe_id(session_id):
         return None
     matches = sorted(CLAUDE_ROOT.glob(f"*/{session_id}.jsonl"), key=_safe_mtime, reverse=True)
     return matches[0] if matches else None
+
+
+_claude_path = claude_path
 
 
 # --- Codex -----------------------------------------------------------------

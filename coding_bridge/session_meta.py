@@ -15,11 +15,10 @@ from typing import Any
 
 from . import store
 
-# Version 2 distinguishes the exact launch selector from the provider-resolved
-# model recorded in transcripts. A legacy `model` value has ambiguous provenance
-# and must never be promoted to a selector.
+# In schema v2, `model` has one meaning: the exact launch selection. Transcript
+# model IDs are exposed separately as `resolved_model` and never enter this file.
 _SCHEMA_VERSION = 2
-_FIELDS = ("version", "cwd", "model_selector", "permission_mode", "effort", "provider")
+_FIELDS = ("version", "cwd", "model", "permission_mode", "effort", "provider")
 _SAFE_ID = re.compile(r"^[A-Za-z0-9._-]+$")
 
 
@@ -36,14 +35,17 @@ def save(config_dir: Path | str, sid: str, **fields: Any) -> None:
     path = _path(config_dir, sid)
     if path is None:
         return
-    selector_supplied = "model_selector" in fields
+    model_supplied = "model" in fields
     data = {k: v for k, v in fields.items() if k in _FIELDS and v is not None}
-    if not data and not selector_supplied:
+    if not data and not model_supplied:
         return
     existing = store.load(path) or {}
-    existing.pop("model", None)
-    if selector_supplied and fields["model_selector"] is None:
-        existing.pop("model_selector", None)
+    # A v1 `model` may be a resolved transcript ID. Drop it during migration;
+    # only the caller-provided v2 value below has launch-selection provenance.
+    if existing.get("version") != _SCHEMA_VERSION:
+        existing.pop("model", None)
+    if model_supplied and fields["model"] is None:
+        existing.pop("model", None)
     existing.update(data)
     existing["version"] = _SCHEMA_VERSION
     store.save(path, existing)

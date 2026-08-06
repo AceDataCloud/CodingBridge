@@ -682,10 +682,9 @@ async def test_history_detail_separates_selector_from_resolved_model(tmp_path, m
         conn,
         monkeypatch,
         "claude-opus-5",
-        {"version": 2, "provider": "claude", "model_selector": "opus[1m]"},
+        {"version": 2, "provider": "claude", "model": "opus[1m]"},
     )
-    assert detail["model_selector"] == "opus[1m]"
-    assert detail["model"] == "opus[1m]"  # compatibility: selector-only
+    assert detail["model"] == "opus[1m]"
     assert detail["resolved_model"] == "claude-opus-5"
 
 
@@ -697,7 +696,6 @@ async def test_history_detail_does_not_resume_from_polluted_legacy_model(tmp_pat
         "claude-opus-5",
         {"provider": "claude", "model": "claude-opus-5"},
     )
-    assert "model_selector" not in detail
     assert "model" not in detail
     assert detail["resolved_model"] == "claude-opus-5"
 
@@ -708,7 +706,7 @@ async def test_history_detail_roundtrips_explicit_bare_selector(tmp_path, monkey
         conn,
         monkeypatch,
         "claude-opus-5",
-        {"version": 2, "provider": "claude", "model_selector": "opus"},
+        {"version": 2, "provider": "claude", "model": "opus"},
     )
-    assert detail["model_selector"] == "opus"
+    assert detail["model"] == "opus"
     assert detail["resolved_model"] == "claude-opus-5"

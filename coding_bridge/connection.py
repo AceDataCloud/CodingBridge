@@ -549,9 +549,8 @@ class BridgeConnection:
             )
             return
         detail = await asyncio.to_thread(history.read_session, provider, session_id)
-        # A transcript records the provider-resolved model, not the exact selector
-        # that launched it. Keep those fields separate: only a versioned sidecar can
-        # supply `model_selector`; legacy `model` values have ambiguous provenance.
+        # Transcript model IDs are resolved identities. Only a schema-v2 sidecar
+        # can supply the launch `model`; legacy sidecars have ambiguous provenance.
         resolved_model = detail.pop("model", None)
         meta = session_meta.load(self.settings.config_dir, session_id)
         if meta.get("permission_mode"):
@@ -560,14 +559,11 @@ class BridgeConnection:
             detail["effort"] = meta["effort"]
         if not detail.get("cwd") and meta.get("cwd"):
             detail["cwd"] = meta["cwd"]
-        selector = meta.get("model_selector")
-        if isinstance(selector, str):
-            detail["model_selector"] = selector
-            # Compatibility for older browser clients: `model` is selector-only.
-            detail["model"] = selector
+        model = meta.get("model") if meta.get("version") == 2 else None
+        if isinstance(model, str):
+            detail["model"] = model
         if isinstance(resolved_model, str):
             detail["resolved_model"] = resolved_model
-        detail["model_contract"] = 2
         await self.send_payload(event_payload(Event.HISTORY_DETAIL, session_id, **detail))
 
     async def _send_fs_list(self, payload: dict) -> None:

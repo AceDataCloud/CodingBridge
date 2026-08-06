@@ -128,7 +128,7 @@ class Session:
                 sdk_session_id,
                 provider=self.provider,
                 cwd=self.cwd,
-                model_selector=self.model,
+                model=self.model,
                 permission_mode=self.permission_mode,
                 effort=self.effort,
             )
@@ -171,8 +171,6 @@ class Session:
                 self.session_id,
                 cwd=self.cwd,
                 model=self.model,
-                model_selector=self.model,
-                model_contract=2,
                 provider=self.provider,
                 permission_mode=self.permission_mode,
                 effort=self.effort,
@@ -358,8 +356,6 @@ class Session:
             "provider": self.provider,
             "cwd": self.cwd,
             "model": self.model,
-            "model_selector": self.model,
-            "model_contract": 2,
             "permission_mode": self.permission_mode,
             "effort": self.effort,
         }

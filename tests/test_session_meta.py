@@ -7,7 +7,7 @@ def test_save_then_load_roundtrip(tmp_path):
         tmp_path,
         "sid-1",
         cwd="/repo",
-        model_selector="opus[1m]",
+        model="opus[1m]",
         permission_mode="plan",
         effort="high",
     )
@@ -15,26 +15,26 @@ def test_save_then_load_roundtrip(tmp_path):
     assert loaded == {
         "version": 2,
         "cwd": "/repo",
-        "model_selector": "opus[1m]",
+        "model": "opus[1m]",
         "permission_mode": "plan",
         "effort": "high",
     }
 
 
 def test_save_merges_and_drops_none(tmp_path):
-    session_meta.save(tmp_path, "sid-1", cwd="/repo", model_selector="opus")
+    session_meta.save(tmp_path, "sid-1", cwd="/repo", model="opus")
     # A later turn only changes effort/mode; cwd/selector must survive the merge.
     session_meta.save(tmp_path, "sid-1", permission_mode="acceptEdits", effort=None)
     loaded = session_meta.load(tmp_path, "sid-1")
     assert loaded["cwd"] == "/repo"
-    assert loaded["model_selector"] == "opus"
+    assert loaded["model"] == "opus"
     assert loaded["permission_mode"] == "acceptEdits"
     assert "effort" not in loaded
 
 
 def test_explicit_default_clears_a_saved_selector(tmp_path):
-    session_meta.save(tmp_path, "sid-1", model_selector="opus[1m]")
-    session_meta.save(tmp_path, "sid-1", model_selector=None)
+    session_meta.save(tmp_path, "sid-1", model="opus[1m]")
+    session_meta.save(tmp_path, "sid-1", model=None)
     loaded = session_meta.load(tmp_path, "sid-1")
     assert loaded == {"version": 2}
 
@@ -64,7 +64,7 @@ def test_legacy_resolved_model_is_not_promoted_to_selector(tmp_path):
     )
     legacy = session_meta.load(tmp_path, "sid-1")
     assert legacy["model"] == "claude-opus-5"
-    assert "model_selector" not in legacy
+    assert "version" not in legacy
 
     session_meta.save(tmp_path, "sid-1", effort="high")
     migrated = session_meta.load(tmp_path, "sid-1")

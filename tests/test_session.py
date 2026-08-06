@@ -169,7 +169,11 @@ async def test_result_with_sdk_session_id_persists_settings(tmp_path):
 
     sess = Session(
         "s1", factory, emit, settings,
-        cwd="/repo", model="opus", permission_mode="acceptEdits", provider="claude", effort="high",
+        cwd="/repo",
+        model="opus",
+        permission_mode="acceptEdits",
+        provider="claude",
+        effort="high",
     )
     await sess.start("hi")
     await sess._task
@@ -177,7 +181,7 @@ async def test_result_with_sdk_session_id_persists_settings(tmp_path):
     assert saved == {
         "version": 2,
         "cwd": "/repo",
-        "model_selector": "opus",
+        "model": "opus",
         "permission_mode": "acceptEdits",
         "effort": "high",
         "provider": "claude",

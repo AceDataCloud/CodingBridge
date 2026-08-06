@@ -659,38 +659,56 @@ def _detail(conn):
     )
 
 
-async def _detail_for(conn, monkeypatch, transcript_model, sidecar_model):
-    """Run history.get with a stubbed transcript + sidecar, return the reply."""
-    from coding_bridge import history, session_meta
+async def _detail_for(conn, monkeypatch, transcript_model, sidecar=None):
+    """Run history.get with stubbed transcript + sidecar, return the reply."""
+    from coding_bridge import history, store
 
     monkeypatch.setattr(
         history,
         "read_session",
         lambda provider, sid: {"provider": provider, "model": transcript_model, "events": []},
     )
-    if sidecar_model:
-        session_meta.save(conn.settings.config_dir, "s1", provider="claude", model=sidecar_model)
+    if sidecar:
+        store.save(conn.settings.config_dir / "sessions" / "s1.json", sidecar)
     await conn._dispatch(
         {"action": Action.HISTORY_GET, "provider": "claude", "session_id": "s1"}
     )
     return _detail(conn)
 
 
-async def test_history_detail_restores_the_1m_context_suffix(tmp_path, monkeypatch):
-    """The transcript logs the resolved id and drops `[1m]`; resuming must not downgrade."""
+async def test_history_detail_separates_selector_from_resolved_model(tmp_path, monkeypatch):
     conn = _reads_conn(tmp_path)
-    detail = await _detail_for(conn, monkeypatch, "claude-opus-5", "opus[1m]")
-    assert detail["model"] == "opus[1m]"
+    detail = await _detail_for(
+        conn,
+        monkeypatch,
+        "claude-opus-5",
+        {"version": 2, "provider": "claude", "model_selector": "opus[1m]"},
+    )
+    assert detail["model_selector"] == "opus[1m]"
+    assert detail["model"] == "opus[1m]"  # compatibility: selector-only
+    assert detail["resolved_model"] == "claude-opus-5"
 
 
-async def test_history_detail_keeps_the_transcript_model_when_it_differs(tmp_path, monkeypatch):
-    """A genuine mid-session model switch is transcript-authoritative, not sidecar."""
+async def test_history_detail_does_not_resume_from_polluted_legacy_model(tmp_path, monkeypatch):
     conn = _reads_conn(tmp_path)
-    detail = await _detail_for(conn, monkeypatch, "claude-sonnet-4-5", "opus[1m]")
-    assert detail["model"] == "claude-sonnet-4-5"
+    detail = await _detail_for(
+        conn,
+        monkeypatch,
+        "claude-opus-5",
+        {"provider": "claude", "model": "claude-opus-5"},
+    )
+    assert "model_selector" not in detail
+    assert "model" not in detail
+    assert detail["resolved_model"] == "claude-opus-5"
 
 
-async def test_history_detail_still_backfills_a_missing_model(tmp_path, monkeypatch):
+async def test_history_detail_roundtrips_explicit_bare_selector(tmp_path, monkeypatch):
     conn = _reads_conn(tmp_path)
-    detail = await _detail_for(conn, monkeypatch, None, "opus")
-    assert detail["model"] == "opus"
+    detail = await _detail_for(
+        conn,
+        monkeypatch,
+        "claude-opus-5",
+        {"version": 2, "provider": "claude", "model_selector": "opus"},
+    )
+    assert detail["model_selector"] == "opus"
+    assert detail["resolved_model"] == "claude-opus-5"

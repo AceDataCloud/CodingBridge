@@ -175,8 +175,9 @@ async def test_result_with_sdk_session_id_persists_settings(tmp_path):
     await sess._task
     saved = session_meta.load(tmp_path, "disk-9")
     assert saved == {
+        "version": 2,
         "cwd": "/repo",
-        "model": "opus",
+        "model_selector": "opus",
         "permission_mode": "acceptEdits",
         "effort": "high",
         "provider": "claude",

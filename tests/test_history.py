@@ -800,7 +800,7 @@ async def test_dispatch_history_get_emits_detail(monkeypatch):
 async def test_dispatch_history_get_folds_in_sidecar(monkeypatch, tmp_path):
     from coding_bridge import session_meta
 
-    # Transcript carries cwd/model but not effort/permission_mode.
+    # Transcript carries cwd/resolved model but not effort/permission mode or selector.
     monkeypatch.setattr(
         history,
         "read_session",
@@ -819,7 +819,9 @@ async def test_dispatch_history_get_folds_in_sidecar(monkeypatch, tmp_path):
     assert detail["permission_mode"] == "plan"
     assert detail["effort"] == "high"
     assert detail["cwd"] == "/repo"  # transcript stays authoritative
-    assert detail["model"] == "opus"
+    assert detail["resolved_model"] == "opus"
+    assert "model_selector" not in detail
+    assert "model" not in detail
 
 
 async def test_dispatch_history_get_requires_params():

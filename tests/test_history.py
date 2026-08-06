@@ -820,7 +820,6 @@ async def test_dispatch_history_get_folds_in_sidecar(monkeypatch, tmp_path):
     assert detail["effort"] == "high"
     assert detail["cwd"] == "/repo"  # transcript stays authoritative
     assert detail["resolved_model"] == "opus"
-    assert "model_selector" not in detail
     assert "model" not in detail
 
 

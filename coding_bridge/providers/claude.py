@@ -240,7 +240,7 @@ class ClaudeProvider:
             ) from exc
         resume_id = claude_transcript.prepare_resume(resume) if resume else None
         logger.info(
-            "claude launch session=%s resume=%s model_selector=%r",
+            "claude launch session=%s resume=%s model=%r",
             resume or self._sdk_session_id or self._session_id,
             bool(resume),
             model,
@@ -410,7 +410,7 @@ class ClaudeProvider:
         resolved_model = data.get("model") if isinstance(data, dict) else None
         if version or resolved_model:
             logger.info(
-                "claude init version=%s session=%s model_selector=%r resolved_model=%r",
+                "claude init version=%s session=%s model=%r resolved_model=%r",
                 version,
                 self._session_id,
                 self._model,

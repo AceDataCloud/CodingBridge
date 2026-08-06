@@ -239,6 +239,12 @@ class ClaudeProvider:
                 "claude-agent-sdk is not installed; run `pip install claude-agent-sdk`"
             ) from exc
         resume_id = claude_transcript.prepare_resume(resume) if resume else None
+        logger.info(
+            "claude launch session=%s resume=%s model_selector=%r",
+            resume or self._sdk_session_id or self._session_id,
+            bool(resume),
+            model,
+        )
         options = ClaudeAgentOptions(
             cwd=cwd or None,
             # Empty means "no --model flag", which lets the CLI apply the user's
@@ -401,9 +407,14 @@ class ClaudeProvider:
             return
         data = getattr(message, "data", None)
         version = data.get("claude_code_version") if isinstance(data, dict) else None
-        if version:
+        resolved_model = data.get("model") if isinstance(data, dict) else None
+        if version or resolved_model:
             logger.info(
-                "claude resume init version=%s session=%s", version, self._session_id
+                "claude init version=%s session=%s model_selector=%r resolved_model=%r",
+                version,
+                self._session_id,
+                self._model,
+                resolved_model,
             )
 
     def _with_attachments(

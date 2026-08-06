@@ -15,8 +15,11 @@ from typing import Any
 
 from . import store
 
-# Only settings that aren't reliably recoverable from the transcript alone.
-_FIELDS = ("cwd", "model", "permission_mode", "effort", "provider")
+# Version 2 distinguishes the exact launch selector from the provider-resolved
+# model recorded in transcripts. A legacy `model` value has ambiguous provenance
+# and must never be promoted to a selector.
+_SCHEMA_VERSION = 2
+_FIELDS = ("version", "cwd", "model_selector", "permission_mode", "effort", "provider")
 _SAFE_ID = re.compile(r"^[A-Za-z0-9._-]+$")
 
 
@@ -33,11 +36,16 @@ def save(config_dir: Path | str, sid: str, **fields: Any) -> None:
     path = _path(config_dir, sid)
     if path is None:
         return
+    selector_supplied = "model_selector" in fields
     data = {k: v for k, v in fields.items() if k in _FIELDS and v is not None}
-    if not data:
+    if not data and not selector_supplied:
         return
     existing = store.load(path) or {}
+    existing.pop("model", None)
+    if selector_supplied and fields["model_selector"] is None:
+        existing.pop("model_selector", None)
     existing.update(data)
+    existing["version"] = _SCHEMA_VERSION
     store.save(path, existing)
 
 

@@ -238,7 +238,7 @@ pytest -q
 
 ## Attribution & license
 
-Licensed under **AGPL-3.0-or-later** (see [LICENSE](https://github.com/AceDataCloud/CodingBridge/blob/main/LICENSE)).
+Licensed under **AGPL-3.0-or-later OR the AceDataCloud Commercial License**. Public users may use the AGPL terms in [LICENSE](https://github.com/AceDataCloud/CodingBridge/blob/main/LICENSE); AceDataCloud-operated products may use [LICENSE-COMMERCIAL.md](LICENSE-COMMERCIAL.md).
 
 The remote permission-relay design — forwarding a coding agent's tool-approval
 decision to a remote approver — was inspired by

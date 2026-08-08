@@ -8,8 +8,8 @@ version = "0.1.0"
 description = "Node daemon for AceDataCloud Coding Bridge — run Claude Code on your own machine and drive it from the web."
 readme = "README.md"
 requires-python = ">=3.10"
-license = "AGPL-3.0-or-later"
-license-files = ["LICENSE"]
+license = "AGPL-3.0-or-later OR LicenseRef-AceDataCloud-Commercial"
+license-files = ["LICENSE", "LICENSE-COMMERCIAL.md"]
 authors = [{ name = "AceDataCloud", email = "dev@acedata.cloud" }]
 keywords = ["claude", "claude-code", "coding-agent", "remote", "websocket", "acedatacloud"]
 classifiers = [

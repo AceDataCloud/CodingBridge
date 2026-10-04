@@ -19,6 +19,7 @@ import re
 from collections.abc import Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -30,8 +31,9 @@ _log = logging.getLogger("coding-bridge.history")
 CLAUDE_ROOT = (
     Path(os.environ.get("CLAUDE_CONFIG_DIR") or str(Path.home() / ".claude")) / "projects"
 )
-CODEX_ROOT = Path.home() / ".codex" / "sessions"
-CODEX_INDEX = Path.home() / ".codex" / "session_index.jsonl"
+CODEX_HOME = Path(os.environ.get("CODEX_HOME") or str(Path.home() / ".codex"))
+CODEX_ROOT = CODEX_HOME / "sessions"
+CODEX_INDEX = CODEX_HOME / "session_index.jsonl"
 COPILOT_ROOT = (
     Path(os.environ.get("COPILOT_HOME") or str(Path.home() / ".copilot")) / "session-state"
 )
@@ -179,12 +181,26 @@ def _summaries(paths: list[Path], parse: Callable[[Path], dict[str, Any]]) -> li
     return [r for r in results if r is not None]
 
 
+def _cached_summary(path: Path, provider: str) -> dict[str, Any]:
+    stat = path.stat()
+    # Only unchanged files reuse a summary. Copies keep caller annotations from
+    # leaking into the cache; the bounded cache holds metadata, never transcripts.
+    return dict(_summary_at_version(str(path), provider, stat.st_mtime_ns, stat.st_size))
+
+
+@lru_cache(maxsize=1000)
+def _summary_at_version(path: str, provider: str, mtime_ns: int, size: int) -> dict[str, Any]:
+    if provider == "claude":
+        return _claude_summary(Path(path))
+    return _codex_summary(Path(path), {})
+
+
 # --- Claude Code -----------------------------------------------------------
 def _list_claude(limit: int) -> list[dict[str, Any]]:
     if not CLAUDE_ROOT.exists():
         return []
     files = sorted(CLAUDE_ROOT.glob("*/*.jsonl"), key=_safe_mtime, reverse=True)[:limit]
-    return _summaries(files, _claude_summary)
+    return _summaries(files, lambda path: _cached_summary(path, "claude"))
 
 
 def _claude_summary(path: Path) -> dict[str, Any]:
@@ -337,7 +353,12 @@ def _list_codex(limit: int) -> list[dict[str, Any]]:
         return []
     files = sorted(CODEX_ROOT.glob("**/rollout-*.jsonl"), key=_safe_mtime, reverse=True)[:limit]
     index = _codex_index()
-    return _summaries(files, lambda path: _codex_summary(path, index))
+    summaries = _summaries(files, lambda path: _cached_summary(path, "codex"))
+    for summary in summaries:
+        meta = index.get(summary.get("session_id") or "", {})
+        summary["title"] = _provider_title(meta.get("thread_name")) or summary["title"]
+        summary["updated_at"] = _iso_ms(meta.get("updated_at")) or summary["updated_at"]
+    return summaries
 
 
 def _codex_summary(path: Path, index: dict[str, dict[str, Any]]) -> dict[str, Any]:

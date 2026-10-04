@@ -828,3 +828,21 @@ async def test_dispatch_history_get_requires_params():
     await conn._dispatch({"action": Action.HISTORY_GET})
     errors = _payloads(conn, Event.SESSION_ERROR)
     assert errors and "required" in errors[0]["message"]
+
+
+def test_summary_cache_invalidates_when_transcript_changes(tmp_path, monkeypatch):
+    from coding_bridge import history
+    path = tmp_path / 'session.jsonl'
+    path.write_text('one')
+    calls = []
+    def parse(p):
+        calls.append(p)
+        return {'title': p.read_text()}
+    monkeypatch.setattr(history, '_claude_summary', parse)
+    first = history._cached_summary(path, 'claude')
+    first['title'] = 'mutated'
+    assert history._cached_summary(path, 'claude')['title'] == 'one'
+    assert len(calls) == 1
+    path.write_text('changed')
+    assert history._cached_summary(path, 'claude')['title'] == 'changed'
+    assert len(calls) == 2

@@ -51,6 +51,7 @@ class ClaudeProvider:
         self._cwd = settings.default_cwd
         self._model: str | None = settings.default_model
         self._permission_mode = "default"
+        self._effort: str | None = None
         self._client: Any = None
         self._connected = False
         self._server_info: dict[str, Any] | None = None
@@ -59,7 +60,7 @@ class ClaudeProvider:
         self._turn_seq = 0
         self._stream_text_ord = 0
         self._open_text: dict[Any, dict[str, Any]] = {}
-        self._saw_text_stream = False
+        self._streamed_blocks: list[dict[str, str]] = []
         # The SDK/CLI's own session id (the resume target) and the uuid of the
         # last transcript message seen. Reported on each turn's result so the
         # browser can fork the conversation here when a prompt is edited.
@@ -118,9 +119,7 @@ class ClaudeProvider:
 
         with contextlib.suppress(Exception):
             watermark = history.claude_watermark(session_id)
-            self._gate_uuids, self._gate_msg_ids = history.claude_ids_before(
-                session_id, watermark
-            )
+            self._gate_uuids, self._gate_msg_ids = history.claude_ids_before(session_id, watermark)
         self._gate_active = bool(self._gate_uuids or self._gate_msg_ids)
 
     async def send(
@@ -133,6 +132,10 @@ class ClaudeProvider:
         effort: str | None = None,
         permission_mode: str | None = None,
     ) -> None:
+        if self._connected and effort != self._effort:
+            # Effort has no runtime setter. Resume the same transcript with the
+            # requested effort instead of silently retaining the previous value.
+            await self.aclose()
         if not self._connected:
             # The subprocess died mid-conversation. Resume its transcript or the
             # follow-up loses all context — and the CLI would replay it anyway.
@@ -173,14 +176,19 @@ class ClaudeProvider:
         """
         resume_id = self._sdk_session_id
         # Optionally roll the working tree back to the edited turn before forking.
-        if restore_code and resume_id and self._client and hasattr(self._client, "rewind_files"):
+        if restore_code:
+            if not resume_id or not self._client or not hasattr(self._client, "rewind_files"):
+                raise RuntimeError("Code restore is unavailable for this session")
             from .. import history
 
             target = history.claude_user_uuid_after(resume_id, cut_uuid)
-            if target:
-                with contextlib.suppress(Exception):
-                    await self._client.rewind_files(target)
+            if not target:
+                raise RuntimeError("No file checkpoint exists for the selected turn")
+            # Never claim a rollback succeeded when the SDK rejected it.
+            await self._client.rewind_files(target)
         await self.aclose()
+        self._announced_identity = False
+        self._last_msg_uuid = None
         self._cwd = self._cwd or self._settings.default_cwd
         fork = bool(cut_uuid and resume_id)
         resume = resume_id if fork else None
@@ -198,25 +206,21 @@ class ClaudeProvider:
             return
         await self._turn(self._with_attachments(prompt, images, attachments), resume_of=resume)
 
-    async def _apply_runtime_changes(
-        self, model: str | None, permission_mode: str | None
-    ) -> None:
+    async def _apply_runtime_changes(self, model: str | None, permission_mode: str | None) -> None:
         """Apply the mid-session changes the streaming SDK supports live.
 
-        Reasoning effort has no live SDK setter, so it only takes effect on the
-        next fresh session; model and permission mode switch in place.
+        Model and permission mode switch in place. send() reconnects the same
+        transcript when reasoning effort changes because the SDK has no setter.
         """
         if model != self._model and hasattr(self._client, "set_model"):
-            with contextlib.suppress(Exception):
-                await self._client.set_model(model or None)
+            await self._client.set_model(model or None)
             self._model = model
         if (
             permission_mode
             and permission_mode != self._permission_mode
             and hasattr(self._client, "set_permission_mode")
         ):
-            with contextlib.suppress(Exception):
-                await self._client.set_permission_mode(permission_mode)
+            await self._client.set_permission_mode(permission_mode)
             self._permission_mode = permission_mode
 
     async def _ensure_client(
@@ -256,6 +260,7 @@ class ClaudeProvider:
             system_prompt={"type": "preset", "preset": "claude_code"},
             setting_sources=["user", "project", "local"],
             resume=resume_id,
+            cli_path=capabilities.resolve_cli("claude", self._settings),
         )
         # The SDK stamps CLAUDE_CODE_ENTRYPOINT=sdk-py, which both the VSCode
         # extension and `claude --resume` treat as "programmatic" and hide from
@@ -286,6 +291,7 @@ class ClaudeProvider:
         self._connected = True
         self._model = model
         self._permission_mode = permission_mode or "default"
+        self._effort = effort
         await self._load_server_info()
 
     async def _load_server_info(self) -> None:
@@ -369,6 +375,8 @@ class ClaudeProvider:
                 mid = msg.get("id")
                 self._gate_stream_replay = bool(mid and mid in self._gate_msg_ids)
                 self._gate_saw_replay = self._gate_saw_replay or self._gate_stream_replay
+                if not self._gate_stream_replay:
+                    await self._handle_stream_event(stream_event)
                 return False
             if self._gate_stream_replay:
                 return False  # drop deltas/stop of a replayed streaming message
@@ -417,9 +425,7 @@ class ClaudeProvider:
                 resolved_model,
             )
 
-    def _with_attachments(
-        self, prompt: str, images: list | None, attachments: list | None
-    ) -> str:
+    def _with_attachments(self, prompt: str, images: list | None, attachments: list | None) -> str:
         image_paths = image_store.save_images(images, self._cwd, session_id=self._session_id)
         files = attachment_store.save_attachments(
             attachments, self._cwd, session_id=self._session_id
@@ -451,7 +457,12 @@ class ClaudeProvider:
                 event_payload(
                     Event.SESSION_RESULT,
                     self._session_id,
-                    subtype=getattr(message, "subtype", None),
+                    subtype=(
+                        "interrupted"
+                        if getattr(message, "terminal_reason", None)
+                        in {"aborted_streaming", "aborted_tools"}
+                        else getattr(message, "subtype", None)
+                    ),
                     is_error=bool(getattr(message, "is_error", False)),
                     result=result,
                     cost_usd=getattr(message, "total_cost_usd", None),
@@ -515,9 +526,7 @@ class ClaudeProvider:
             lines.append(f"- **Model:** {self._model}")
         lines.append(f"- **Permission mode:** {self._permission_mode}")
         lines.append(f"- **Working directory:** {self._cwd or self._settings.default_cwd}")
-        await self._emit(
-            event_payload(Event.SESSION_TEXT, self._session_id, text="\n".join(lines))
-        )
+        await self._emit(event_payload(Event.SESSION_TEXT, self._session_id, text="\n".join(lines)))
 
     async def _emit_slash_notice(self, name: str) -> None:
         await self._emit(
@@ -550,17 +559,18 @@ class ClaudeProvider:
         self._turn_seq += 1
         self._stream_text_ord = 0
         self._open_text = {}
-        self._saw_text_stream = False
+        self._streamed_blocks = []
 
     async def _flush_open_text(self) -> None:
         """Commit any streamed text block that never saw a stop event."""
         if not self._open_text:
             return
         for blk in list(self._open_text.values()):
+            if blk.get("committed"):
+                continue
+            self._streamed_blocks.append(blk)
             await self._emit(
-                event_payload(
-                    Event.SESSION_TEXT, self._session_id, text=blk["text"], id=blk["id"]
-                )
+                event_payload(Event.SESSION_TEXT, self._session_id, text=blk["text"], id=blk["id"])
             )
         self._open_text = {}
 
@@ -571,20 +581,31 @@ class ClaudeProvider:
         still emitted whole from the assembled AssistantMessage.
         """
         etype = raw.get("type")
-        if etype == "content_block_start":
+        if etype == "message_start":
+            self._streamed_blocks = []
+        elif etype == "content_block_start":
             block = raw.get("content_block") or {}
             if block.get("type") == "text":
                 stream_id = f"{self._session_id}:{self._turn_seq}:{self._stream_text_ord}"
                 self._stream_text_ord += 1
-                self._open_text[raw.get("index")] = {"id": stream_id, "text": ""}
+                initial = block.get("text") or ""
+                self._open_text[raw.get("index")] = {"id": stream_id, "text": initial}
+                if initial:
+                    await self._emit(
+                        event_payload(
+                            Event.SESSION_TEXT_DELTA,
+                            self._session_id,
+                            text=initial,
+                            id=stream_id,
+                        )
+                    )
         elif etype == "content_block_delta":
             delta = raw.get("delta") or {}
             if delta.get("type") == "text_delta":
                 blk = self._open_text.get(raw.get("index"))
-                if blk is not None:
+                if blk is not None and not blk.get("committed"):
                     chunk = delta.get("text") or ""
                     blk["text"] += chunk
-                    self._saw_text_stream = True
                     await self._emit(
                         event_payload(
                             Event.SESSION_TEXT_DELTA,
@@ -595,7 +616,8 @@ class ClaudeProvider:
                     )
         elif etype == "content_block_stop":
             blk = self._open_text.pop(raw.get("index"), None)
-            if blk is not None:
+            if blk is not None and not blk.get("committed"):
+                self._streamed_blocks.append(blk)
                 await self._emit(
                     event_payload(
                         Event.SESSION_TEXT, self._session_id, text=blk["text"], id=blk["id"]
@@ -608,10 +630,40 @@ class ClaudeProvider:
                 event_payload(Event.SESSION_THINKING, self._session_id, text=block.thinking)
             )
         elif hasattr(block, "text"):
-            # Already streamed + committed via stream events this turn.
-            if self._saw_text_stream:
-                return
-            await self._emit(event_payload(Event.SESSION_TEXT, self._session_id, text=block.text))
+            # Match this complete block, not a turn-wide "saw any delta" flag.
+            # Some providers stream an empty/partial block then deliver the real
+            # answer only in AssistantMessage; it must repair the same bubble.
+            open_block = next(
+                (item for item in self._open_text.values() if not item.get("committed")), None
+            )
+            if open_block is not None:
+                # The SDK can emit AssistantMessage BEFORE content_block_stop.
+                # Commit its authoritative text to the same bubble exactly once.
+                open_block.update(text=block.text, committed=True)
+                await self._emit(
+                    event_payload(
+                        Event.SESSION_TEXT,
+                        self._session_id,
+                        text=block.text,
+                        id=open_block["id"],
+                    )
+                )
+            elif self._streamed_blocks:
+                streamed = self._streamed_blocks.pop(0)
+                if streamed["text"] == block.text:
+                    return
+                await self._emit(
+                    event_payload(
+                        Event.SESSION_TEXT,
+                        self._session_id,
+                        text=block.text,
+                        id=streamed["id"],
+                    )
+                )
+            else:
+                await self._emit(
+                    event_payload(Event.SESSION_TEXT, self._session_id, text=block.text)
+                )
         elif hasattr(block, "name") and hasattr(block, "input"):
             await self._emit(
                 event_payload(

@@ -118,3 +118,36 @@ def test_from_env_reads_override(monkeypatch):
 def test_from_env_defaults_to_visible(monkeypatch):
     monkeypatch.delenv("CODING_BRIDGE_CLAUDE_ENTRYPOINT", raising=False)
     assert Settings.from_env().claude_entrypoint == DEFAULT_CLAUDE_ENTRYPOINT
+
+
+async def test_explicit_cli_path_is_passed_to_sdk(fake_sdk, monkeypatch):
+    monkeypatch.setattr(
+        'coding_bridge.providers.claude.capabilities.resolve_cli',
+        lambda cli, settings: '/custom/claude',
+    )
+    options = await _connect(Settings(claude_path='/custom/claude'), fake_sdk)
+    assert options.cli_path == '/custom/claude'
+
+
+async def test_effort_change_resumes_same_session(monkeypatch):
+    provider = ClaudeProvider('s1', _noop_emit, None, Settings())
+    provider._connected = True
+    provider._effort = 'low'
+    provider._sdk_session_id = 'sdk-existing'
+    calls = {}
+    async def close():
+        provider._connected = False
+    async def connect(**kwargs):
+        calls.update(kwargs)
+    async def turn(*args, **kwargs):
+        pass
+    monkeypatch.setattr(provider, 'aclose', close)
+    monkeypatch.setattr(provider, '_ensure_client', connect)
+    monkeypatch.setattr(provider, '_turn', turn)
+    await provider.send('continue', effort='high')
+    assert calls['effort'] == 'high'
+    assert calls['resume'] == 'sdk-existing'
+
+
+async def _noop_emit(_event):
+    pass

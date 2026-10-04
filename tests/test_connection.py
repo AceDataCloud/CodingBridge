@@ -710,3 +710,25 @@ async def test_history_detail_roundtrips_explicit_bare_selector(tmp_path, monkey
     )
     assert detail["model"] == "opus"
     assert detail["resolved_model"] == "claude-opus-5"
+
+
+async def test_slow_discovery_does_not_block_ping_or_duplicate_reads(monkeypatch):
+    conn = _new_conn()
+    release = asyncio.Event()
+    started = asyncio.Event()
+    calls = []
+    async def slow(_payload):
+        calls.append('history')
+        started.set()
+        await release.wait()
+    monkeypatch.setattr(conn, '_send_history_list', slow)
+    raw = json.dumps({'type': protocol.BROWSER_TO_NODE, 'payload': {'action': Action.HISTORY_LIST}})
+    await conn._on_raw(raw)
+    await started.wait()
+    await conn._on_raw(raw)
+    await conn._on_raw(json.dumps({
+        'type': protocol.BROWSER_TO_NODE, 'payload': {'action': Action.PING},
+    }))
+    assert Event.PONG in _events(conn)
+    assert calls == ['history']
+    await conn.aclose()

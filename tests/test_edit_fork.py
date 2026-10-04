@@ -207,3 +207,33 @@ async def test_codex_edit_reports_unsupported():
     notices = [e for e in events if e["event"] == "session.notice"]
     assert notices and notices[0]["code"] == "edit_unsupported"
     assert [e for e in events if e["event"] == "session.result"]
+
+
+async def test_edit_announces_the_new_fork_identity(monkeypatch):
+    provider, events = _capturing()
+    provider._sdk_session_id = 'old-sdk'
+    provider._session_id = 'old-sdk'
+    provider._announced_identity = True
+    _stub_run(provider, monkeypatch)
+    await provider.edit('replacement', cut_uuid='keep')
+    await provider._handle_message(_Result(session_id='new-sdk'))
+    identities = [e for e in events if e['event'] == 'session.identified']
+    assert identities == [{
+        'event': 'session.identified', 'session_id': 'old-sdk', 'sdk_session_id': 'new-sdk',
+    }]
+    assert events[-1]['session_id'] == 'new-sdk'
+
+
+async def test_restore_failure_does_not_fork(monkeypatch):
+    import pytest
+    provider, _ = _capturing()
+    provider._sdk_session_id = 'existing'
+    class Client:
+        async def rewind_files(self, _target):
+            raise RuntimeError('checkpoint unavailable')
+    provider._client = Client()
+    monkeypatch.setattr(history, 'claude_user_uuid_after', lambda *a: 'checkpoint')
+    calls = _stub_run(provider, monkeypatch)
+    with pytest.raises(RuntimeError, match='checkpoint unavailable'):
+        await provider.edit('rewrite', cut_uuid='keep', restore_code=True)
+    assert not calls

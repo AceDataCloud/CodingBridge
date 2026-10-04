@@ -186,7 +186,7 @@ def test_command_name_set_lowercases_names_and_aliases():
     assert capabilities.command_name_set(cmds) == {"usage", "cost", "stats", "context"}
 
 
-def test_codex_commands_reads_prompts_dir(tmp_path, monkeypatch):
+def test_codex_does_not_advertise_unexecutable_custom_prompts(tmp_path, monkeypatch):
     prompts = tmp_path / "prompts"
     prompts.mkdir()
     (prompts / "deploy.md").write_text("do deploy")
@@ -194,7 +194,7 @@ def test_codex_commands_reads_prompts_dir(tmp_path, monkeypatch):
     (prompts / "ignore.txt").write_text("not markdown")
     monkeypatch.setenv("CODEX_HOME", str(tmp_path))
     names = sorted(c["name"] for c in capabilities._codex_commands())
-    assert names == ["deploy", "review"]
+    assert names == []
 
 
 def test_codex_commands_empty_without_dir(tmp_path, monkeypatch):
@@ -222,3 +222,13 @@ def test_claude_offers_the_1m_context_variants():
     assert {"opus[1m]", "sonnet[1m]"} <= values
     # "" means "send no --model", so the CLI applies the user's settings.json.
     assert "" in values
+
+
+def test_claude_sdk_bundled_cli_is_available_without_global_install(monkeypatch, tmp_path):
+    binary = tmp_path / 'claude'
+    binary.write_text('#!/bin/sh\n')
+    binary.chmod(0o755)
+    monkeypatch.setattr(capabilities.shutil, 'which', lambda cli: None)
+    monkeypatch.setattr(capabilities, '_bundled_claude', lambda: str(binary))
+    assert capabilities.resolve_cli('claude') == str(binary)
+    assert capabilities.describe()['providers'][0]['available']

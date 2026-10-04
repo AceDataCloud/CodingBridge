@@ -198,3 +198,18 @@ async def test_retry_limit_is_respected():
     prov = holder["provider"]
     assert prov.calls == 2  # original + 1 retry, then give up
     assert len(_errors(events)) == 1
+
+
+async def test_interrupt_denies_pending_approval_and_clears_browser_prompt():
+    import asyncio
+    sess, events, _ = _make(['ok'])
+    pending = asyncio.create_task(sess._ask_permission('Bash', {'command': 'echo test'}, {}))
+    await asyncio.sleep(0)
+    request_id = sess.pending_permissions()[0]['request_id']
+    await sess.interrupt()
+    assert (await pending).decision == 'deny'
+    assert sess.pending_permissions() == []
+    assert any(
+        e['event'] == Event.PERMISSION_RESOLVED and e['request_id'] == request_id
+        for e in events
+    )

@@ -11,12 +11,15 @@ import asyncio
 import contextlib
 import json
 import logging
-import math
-import shutil
+import os
+import signal
 import uuid
 from typing import TYPE_CHECKING, Any
 
+import psutil
+
 from .. import attachments as attachment_store
+from .. import capabilities
 from .. import images as image_store
 from ..protocol import Event, event_payload
 from .base import slash_name
@@ -38,12 +41,24 @@ _DEFAULT_SANDBOX = "workspace-write"
 _EFFORT_ALIASES = {"max": "high", "ultra-high": "high", "ultrahigh": "high"}
 _EFFORT_VALUES = {"minimal", "low", "medium", "high", "xhigh"}
 
-# Typewriter cadence for codex agent messages. ``codex exec`` delivers the final
-# message whole, so we replay it as text deltas for visual streaming parity with
-# Claude. Tests patch STREAM_DELAY to 0 for determinism.
-STREAM_CHUNK_TARGET = 80
-STREAM_MIN_CHUNK = 3
-STREAM_DELAY = 0.012
+# Bound malformed/unbounded provider output without asyncio's 64 KiB line limit.
+_MAX_EVENT_BYTES = 8 * 1024 * 1024
+_STOP_GRACE_SECONDS = 2.0
+
+
+async def _json_lines(stream: asyncio.StreamReader):
+    pending = bytearray()
+    while chunk := await stream.read(64 * 1024):
+        pending.extend(chunk)
+        while (end := pending.find(b"\n")) >= 0:
+            if end > _MAX_EVENT_BYTES:
+                raise RuntimeError("Codex output event exceeds the 8 MiB limit")
+            yield bytes(pending[:end])
+            del pending[: end + 1]
+        if len(pending) > _MAX_EVENT_BYTES:
+            raise RuntimeError("Codex output event exceeds the 8 MiB limit")
+    if pending:
+        yield bytes(pending)
 
 
 def _codex_effort(effort: str | None) -> str | None:
@@ -76,6 +91,8 @@ class CodexProvider:
         self._proc: asyncio.subprocess.Process | None = None
         # Announced the real (thread) id to the browser yet? See claude.py.
         self._announced_identity = False
+        self._interrupted = False
+        self._stop_lock = asyncio.Lock()
 
     async def start(
         self,
@@ -229,7 +246,8 @@ class CodexProvider:
         images: list | None = None,
         attachments: list | None = None,
     ) -> None:
-        if shutil.which("codex") is None:
+        cli = capabilities.resolve_cli("codex", self._settings)
+        if cli is None:
             raise RuntimeError(
                 "codex CLI is not installed; install it from https://github.com/openai/codex"
             )
@@ -240,24 +258,24 @@ class CodexProvider:
         image_paths = legacy_image_paths + attachment_store.image_paths(files)
         prompt = attachment_store.attachment_note(prompt, files, legacy_image_paths)
         argv = self._build_argv(prompt, resume=resume, image_paths=image_paths)
+        argv[0] = cli
+        self._interrupted = False
         self._proc = await asyncio.create_subprocess_exec(
             *argv,
             cwd=self._cwd or None,
             stdin=asyncio.subprocess.DEVNULL,  # never block reading an inherited stdin
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            start_new_session=os.name == "posix",
         )
         proc = self._proc
-        stderr_tail: list[str] = []
+        stderr_tail = bytearray()
         drain = asyncio.create_task(self._drain_stderr(proc, stderr_tail))
         self._last_error = None
         saw_result = False
         try:
             assert proc.stdout is not None
-            while True:
-                raw = await proc.stdout.readline()
-                if not raw:
-                    break
+            async for raw in _json_lines(proc.stdout):
                 line = raw.decode("utf-8", "replace").strip()
                 if not line:
                     continue
@@ -267,30 +285,46 @@ class CodexProvider:
                     continue
                 if await self._handle_event(obj):
                     saw_result = True
+        except BaseException:
+            # Kill before waiting: unread pipes can otherwise deadlock proc.wait().
+            await self._stop_process_tree(proc)
+            if proc.stdout is not None:
+                await proc.stdout.read()
+            raise
         finally:
             await proc.wait()
             drain.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await drain
-            self._proc = None
-        if proc.returncode not in (0, None) and not saw_result:
-            detail = (
-                self._last_error
-                or " ".join(stderr_tail[-5:]).strip()
-                or f"codex exited with {proc.returncode}"
-            )
-            await self._emit(event_payload(Event.SESSION_ERROR, self._session_id, message=detail))
+            if self._proc is proc:
+                self._proc = None
+        if not saw_result:
+            if self._interrupted:
+                await self._emit(
+                    event_payload(
+                        Event.SESSION_RESULT,
+                        self._session_id,
+                        subtype="interrupted",
+                        is_error=False,
+                        sdk_session_id=self._thread_id,
+                    )
+                )
+            else:
+                detail = (
+                    self._last_error
+                    or stderr_tail.decode("utf-8", "replace").strip()
+                    or f"Codex exited without a turn result (exit {proc.returncode})"
+                )
+                await self._emit(
+                    event_payload(Event.SESSION_ERROR, self._session_id, message=detail)
+                )
 
-    async def _drain_stderr(self, proc: asyncio.subprocess.Process, tail: list[str]) -> None:
+    async def _drain_stderr(self, proc: asyncio.subprocess.Process, tail: bytearray) -> None:
         if proc.stderr is None:
             return
-        with contextlib.suppress(asyncio.CancelledError):
-            while True:
-                raw = await proc.stderr.readline()
-                if not raw:
-                    return
-                tail.append(raw.decode("utf-8", "replace").rstrip())
-                del tail[:-20]
+        while chunk := await proc.stderr.read(16 * 1024):
+            tail.extend(chunk)
+            del tail[: -16 * 1024]
 
     async def _maybe_announce_identity(self) -> None:
         """Adopt the codex thread id as this session's canonical id, once known.
@@ -400,42 +434,52 @@ class CodexProvider:
             await self._emit_text_stream(item["text"])
 
     async def _emit_text_stream(self, text: str) -> None:
-        """Replay a whole agent message as incremental text deltas + a commit.
-
-        ``codex exec`` has no native token streaming, so we chunk the final
-        message into deltas (capped chunk count) to mirror Claude's streaming
-        UX, then emit an authoritative ``session.text`` carrying the same id.
-        """
-        stream_id = f"{self._session_id}:{uuid.uuid4().hex[:8]}"
-        size = max(STREAM_MIN_CHUNK, math.ceil(len(text) / STREAM_CHUNK_TARGET))
-        for start in range(0, len(text), size):
-            chunk = text[start : start + size]
-            await self._emit(
-                event_payload(
-                    Event.SESSION_TEXT_DELTA, self._session_id, text=chunk, id=stream_id
-                )
-            )
-            if STREAM_DELAY:
-                await asyncio.sleep(STREAM_DELAY)
+        # exec supplies whole messages. Forward immediately instead of delaying
+        # the next event behind dozens of artificial typewriter updates.
         await self._emit(
-            event_payload(Event.SESSION_TEXT, self._session_id, text=text, id=stream_id)
+            event_payload(
+                Event.SESSION_TEXT,
+                self._session_id,
+                text=text,
+                id=f"{self._session_id}:{uuid.uuid4().hex[:8]}",
+            )
         )
+
+    async def _stop_process_tree(self, proc: asyncio.subprocess.Process) -> None:
+        async with self._stop_lock:
+
+            def stop() -> None:
+                try:
+                    parent = psutil.Process(proc.pid)
+                    children = parent.children(recursive=True)
+                except psutil.NoSuchProcess:
+                    return
+                # Codex gives shell jobs their own process groups. Killing only
+                # Codex's group misses them; capture descendants before reparenting.
+                targets = [*reversed(children), parent]
+                for target in targets:
+                    with contextlib.suppress(psutil.NoSuchProcess):
+                        target.terminate()
+                _, alive = psutil.wait_procs(targets, timeout=_STOP_GRACE_SECONDS)
+                for target in alive:
+                    with contextlib.suppress(psutil.NoSuchProcess):
+                        target.kill()
+                if os.name == "posix":
+                    with contextlib.suppress(ProcessLookupError):
+                        os.killpg(proc.pid, signal.SIGKILL)
+                psutil.wait_procs(alive, timeout=_STOP_GRACE_SECONDS)
+
+            await asyncio.to_thread(stop)
 
     async def interrupt(self) -> None:
         proc = self._proc
-        if proc is None or proc.returncode is not None:
+        if proc is None:
             return
-        with contextlib.suppress(ProcessLookupError):
-            proc.terminate()
+        self._interrupted = True
+        await self._stop_process_tree(proc)
 
     async def aclose(self) -> None:
-        proc = self._proc
-        if proc is not None and proc.returncode is None:
-            with contextlib.suppress(ProcessLookupError):
-                proc.kill()
-            with contextlib.suppress(Exception):
-                await proc.wait()
-        self._proc = None
+        await self.interrupt()
 
 
 def _error_message(obj: dict[str, Any]) -> str | None:

@@ -12,7 +12,8 @@ relay only carries JSON messages.
 ## Install
 
 Requires **Python 3.10+** and a signed-in
-[Claude Code](https://docs.claude.com/en/docs/claude-code) CLI. To use the
+[Claude Code](https://docs.claude.com/en/docs/claude-code) CLI. The Claude Agent SDK
+bundled CLI is detected too; a separate global installation is optional. To use the
 **Codex** provider instead, install the
 [Codex CLI](https://github.com/openai/codex) and run `codex login`.
 
@@ -147,9 +148,8 @@ That shape is the whole security model:
 - **Execution is local.** Your repo, shell, and MCP servers only ever touch this
   machine.
 - **Outbound only.** No listening ports, so nothing to expose or firewall.
-- **Per-tool approval — in the modes that ask.** In `default` mode every tool
-  the agent wants to run is relayed to you as a permission request; nothing runs
-  until you allow it, and a timeout denies by default. The looser modes are
+- **Per-tool approval — in the modes that ask.** In `default` mode Claude follows the local approval rules; tools that need
+  approval are relayed to you. A timeout denies by default. The looser modes are
   looser on purpose: `acceptEdits` auto-accepts edits, and `bypassPermissions`
   runs everything unattended. Codex never asks interactively at all — `codex
   exec` maps the permission mode to a sandbox policy instead (plan →
@@ -245,3 +245,18 @@ decision to a remote approver — was inspired by
 [VibeBridge](https://github.com/Swayyyyy/VibeBridge) (GPL-3.0). This is an
 independent implementation built on the public `claude-agent-sdk`; **no
 VibeBridge source code is included.** See [NOTICE](https://github.com/AceDataCloud/CodingBridge/blob/main/NOTICE).
+
+## Session reliability
+
+- **Stop** cancels the active Codex process and its child commands and returns the
+  session to idle. You can continue the same conversation afterward. Claude uses
+  its native interrupt control, and pending Bridge approvals are denied on stop.
+- Codex output is displayed as soon as a complete message arrives, without an
+  artificial typewriter delay. Individual JSON events up to 8 MiB are supported;
+  larger events fail clearly and terminate the subprocess instead of hanging.
+- Claude model and permission changes must succeed before they are applied.
+  Changing reasoning effort resumes the same transcript with the new setting.
+- History and capability discovery run independently so loading a large local
+  history cannot block stop or approval commands.
+- New Homebrew service installations use a stable `opt` interpreter path when
+  available. Reinstall an existing service once to replace an old Cellar path.

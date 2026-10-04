@@ -60,6 +60,7 @@ class BridgeConnection:
         self._truncated_sessions: set[str] = set()
         # Dedup browser commands the relay may redeliver (a command queued across
         # our reconnect, then flushed). Bounded ring of recently seen cmd_ids.
+        self._read_tasks: dict[str, asyncio.Task] = {}
         self._seen_cmds: set[str] = set()
         self._seen_cmd_order: deque[str] = deque()
 
@@ -259,7 +260,17 @@ class BridgeConnection:
             # re-spawn a turn or re-run a prompt.
             if self._is_duplicate_command(message.get("cmd_id")):
                 return
-            await self._dispatch(message.get("payload") or {})
+            payload = message.get("payload") or {}
+            action = payload.get("action")
+            if action in (Action.HISTORY_LIST, Action.CAPABILITIES_GET):
+                # Large local histories and CLI initialization must not delay
+                # stop/approval commands or acknowledgement processing.
+                existing = self._read_tasks.get(action)
+                if existing is None or existing.done():
+                    task = asyncio.create_task(self._dispatch(payload))
+                    self._read_tasks[action] = task
+            else:
+                await self._dispatch(payload)
         elif msg_type == protocol.NODE_ACK:
             up_to = (message.get("payload") or {}).get("up_to_node_seq")
             if isinstance(up_to, int):
@@ -579,6 +590,11 @@ class BridgeConnection:
         await self.send_payload(event_payload(Event.CAPABILITIES, **descriptor))
 
     async def aclose(self) -> None:
+        tasks = list(self._read_tasks.values())
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        self._read_tasks.clear()
         for session in list(self.sessions.values()):
             await session.close()
         self.sessions.clear()

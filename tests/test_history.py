@@ -846,3 +846,26 @@ def test_summary_cache_invalidates_when_transcript_changes(tmp_path, monkeypatch
     path.write_text('changed')
     assert history._cached_summary(path, 'claude')['title'] == 'changed'
     assert len(calls) == 2
+
+
+def test_codex_history_uses_real_prompt_after_injected_plugin_catalog(tmp_path):
+    import json
+
+    from coding_bridge import history
+    path = tmp_path / 'rollout-test.jsonl'
+    records = [
+        {'type': 'session_meta', 'payload': {'id': 'test', 'cwd': '/fixture'}},
+        {'type': 'response_item', 'payload': {'type': 'message', 'role': 'user', 'content': [
+            {'type': 'input_text', 'text': (
+                'Here is a list of plugins that are available but not installed.\n- Example'
+            )}
+        ]}},
+        {'type': 'response_item', 'payload': {'type': 'message', 'role': 'user', 'content': [
+            {'type': 'input_text', 'text': 'Fix the calculator'}
+        ]}},
+    ]
+    path.write_text('\n'.join(json.dumps(r) for r in records))
+    assert history._codex_summary(path, {})['title'] == 'Fix the calculator'
+    header, events = history._codex_read(path, {})
+    assert header['title'] == 'Fix the calculator'
+    assert [e['text'] for e in events if e['kind'] == 'prompt'] == ['Fix the calculator']

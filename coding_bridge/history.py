@@ -748,6 +748,8 @@ _NOISE_PREFIXES = (
     "# copilot instructions",
     "# context from my ide setup",
     "the following is the codex agent history",
+    "here is a list of plugins that are available but not installed.",
+    "[request interrupted by user",
     "the user opened the file",
     "the user selected the lines",
     "the user interrupted the previous turn",

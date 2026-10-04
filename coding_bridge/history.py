@@ -456,7 +456,11 @@ def _codex_response_event(
                 "kind": "tool_use",
                 "tool": payload.get("name"),
                 "tool_use_id": payload.get("call_id"),
-                "input": _maybe_json(payload.get("arguments", payload.get("input"))),
+                "input": (
+                    {"patch": payload.get("input")}
+                    if ptype == "custom_tool_call" and isinstance(payload.get("input"), str)
+                    else _maybe_json(payload.get("arguments"))
+                ),
                 "ts": ts,
             }
         )

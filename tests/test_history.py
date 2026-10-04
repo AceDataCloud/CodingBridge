@@ -884,4 +884,5 @@ def test_codex_patch_tool_is_not_lost_in_history():
     }, None, events, header)
     assert [e['kind'] for e in events] == ['tool_use', 'tool_result']
     assert events[0]['tool'] == 'apply_patch'
+    assert events[0]['input'] == {'patch': '*** Begin Patch\n*** End Patch'}
     assert events[1]['content'] == 'Success'

@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import importlib.util
 import json
 import logging
 import os
@@ -58,8 +59,9 @@ _COPILOT_EFFORTS: list[str] = ["", "low", "medium", "high"]
 # Codex host paths. `models_cache.json` is codex's own API-fetched, per-account
 # model catalog (authoritative); config.toml carries the user's chosen default
 # model / effort, used only as a fallback when the cache can't be read.
-CODEX_CONFIG = Path.home() / ".codex" / "config.toml"
-CODEX_MODELS_CACHE = Path.home() / ".codex" / "models_cache.json"
+CODEX_HOME = Path(os.environ.get("CODEX_HOME") or str(Path.home() / ".codex"))
+CODEX_CONFIG = CODEX_HOME / "config.toml"
+CODEX_MODELS_CACHE = CODEX_HOME / "models_cache.json"
 _CODEX_FALLBACK_MODELS: list[dict[str, str]] = [
     {"value": "gpt-5.5", "label": "GPT-5.5"},
     {"value": "gpt-5", "label": "GPT-5"},
@@ -170,7 +172,24 @@ def _candidate_cli_paths(cli: str) -> list[str]:
     if cli == "claude":
         fixed.insert(0, home / ".claude" / "local" / "claude")  # native installer
     out += [str(p) for p in fixed]
+    if cli == "claude":
+        bundled = _bundled_claude()
+        if bundled:
+            out.append(bundled)
     return out
+
+
+def _bundled_claude() -> str | None:
+    try:
+        spec = importlib.util.find_spec("claude_agent_sdk")
+    except (ImportError, ValueError):
+        return None
+    if spec and spec.origin:
+        name = "claude.exe" if os.name == "nt" else "claude"
+        path = Path(spec.origin).parent / "_bundled" / name
+        if path.is_file():
+            return str(path)
+    return None
 
 
 def resolve_cli(cli: str, settings: Any | None = None) -> str | None:
@@ -365,6 +384,7 @@ async def _probe_claude_commands(settings: Any) -> list[dict[str, Any]]:
             cwd=(getattr(settings, "default_cwd", "") or None),
             system_prompt={"type": "preset", "preset": "claude_code"},
             setting_sources=["user", "project", "local"],
+            cli_path=resolve_cli("claude", settings),
         )
         client = ClaudeSDKClient(options=options)
         await asyncio.wait_for(client.connect(), timeout=45)
@@ -380,27 +400,8 @@ async def _probe_claude_commands(settings: Any) -> list[dict[str, Any]]:
 
 
 def _codex_commands() -> list[dict[str, Any]]:
-    """Codex custom prompts (`$CODEX_HOME/prompts/*.md`) surfaced as slash commands.
-
-    `codex exec` is non-interactive and has no built-in slash processor, so only
-    user-defined prompt files are advertised; the rest of Codex's interactive
-    slash commands cannot run remotely.
-    """
-    home = os.environ.get("CODEX_HOME") or os.path.join(os.path.expanduser("~"), ".codex")
-    prompts_dir = Path(home) / "prompts"
-    if not prompts_dir.is_dir():
-        return []
-    commands: list[dict[str, Any]] = []
-    try:
-        entries = sorted(prompts_dir.glob("*.md"))
-    except OSError:
-        return []
-    for path in entries:
-        name = path.stem
-        if not name:
-            continue
-        commands.append({"name": name, "description": "", "argument_hint": "", "aliases": []})
-    return commands
+    """exec cannot execute slash commands; do not advertise unusable entries."""
+    return []
 
 
 def _copilot_commands() -> list[dict[str, Any]]:

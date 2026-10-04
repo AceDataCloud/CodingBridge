@@ -828,3 +828,61 @@ async def test_dispatch_history_get_requires_params():
     await conn._dispatch({"action": Action.HISTORY_GET})
     errors = _payloads(conn, Event.SESSION_ERROR)
     assert errors and "required" in errors[0]["message"]
+
+
+def test_summary_cache_invalidates_when_transcript_changes(tmp_path, monkeypatch):
+    from coding_bridge import history
+    path = tmp_path / 'session.jsonl'
+    path.write_text('one')
+    calls = []
+    def parse(p):
+        calls.append(p)
+        return {'title': p.read_text()}
+    monkeypatch.setattr(history, '_claude_summary', parse)
+    first = history._cached_summary(path, 'claude')
+    first['title'] = 'mutated'
+    assert history._cached_summary(path, 'claude')['title'] == 'one'
+    assert len(calls) == 1
+    path.write_text('changed')
+    assert history._cached_summary(path, 'claude')['title'] == 'changed'
+    assert len(calls) == 2
+
+
+def test_codex_history_uses_real_prompt_after_injected_plugin_catalog(tmp_path):
+    import json
+
+    from coding_bridge import history
+    path = tmp_path / 'rollout-test.jsonl'
+    records = [
+        {'type': 'session_meta', 'payload': {'id': 'test', 'cwd': '/fixture'}},
+        {'type': 'response_item', 'payload': {'type': 'message', 'role': 'user', 'content': [
+            {'type': 'input_text', 'text': (
+                'Here is a list of plugins that are available but not installed.\n- Example'
+            )}
+        ]}},
+        {'type': 'response_item', 'payload': {'type': 'message', 'role': 'user', 'content': [
+            {'type': 'input_text', 'text': 'Fix the calculator'}
+        ]}},
+    ]
+    path.write_text('\n'.join(json.dumps(r) for r in records))
+    assert history._codex_summary(path, {})['title'] == 'Fix the calculator'
+    header, events = history._codex_read(path, {})
+    assert header['title'] == 'Fix the calculator'
+    assert [e['text'] for e in events if e['kind'] == 'prompt'] == ['Fix the calculator']
+
+
+def test_codex_patch_tool_is_not_lost_in_history():
+    from coding_bridge import history
+    events = []
+    header = {'title': ''}
+    history._codex_response_event({
+        'type': 'custom_tool_call', 'name': 'apply_patch', 'call_id': 'patch-1',
+        'input': '*** Begin Patch\n*** End Patch',
+    }, None, events, header)
+    history._codex_response_event({
+        'type': 'custom_tool_call_output', 'call_id': 'patch-1', 'output': 'Success',
+    }, None, events, header)
+    assert [e['kind'] for e in events] == ['tool_use', 'tool_result']
+    assert events[0]['tool'] == 'apply_patch'
+    assert events[0]['input'] == {'patch': '*** Begin Patch\n*** End Patch'}
+    assert events[1]['content'] == 'Success'

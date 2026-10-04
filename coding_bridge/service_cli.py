@@ -33,9 +33,23 @@ def _system() -> str:
 
 def _plan(settings: Settings) -> ServicePlan | None:
     try:
-        return build_service_plan(_system(), sys.executable, settings.config_dir, Path.home())
+        return build_service_plan(_system(), _service_python(), settings.config_dir, Path.home())
     except ValueError:
         return None
+
+
+def _service_python() -> str:
+    """Keep a Homebrew service on the stable opt link across version upgrades."""
+    path = Path(sys.executable)
+    parts = path.parts
+    if "Cellar" in parts:
+        index = parts.index("Cellar")
+        if len(parts) > index + 3:
+            stable = Path(*parts[:index]) / "opt" / parts[index + 1]
+            stable = stable.joinpath(*parts[index + 3:])
+            if stable.is_file() and stable.resolve() == path.resolve():
+                return str(stable)
+    return str(path)
 
 
 def _run(cmds: list[list[str]]) -> int:

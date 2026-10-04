@@ -338,6 +338,12 @@ class Session:
             await self._provider.aclose()
 
     async def interrupt(self) -> None:
+        pending = self._broker.pending_ids()
+        self._broker.cancel_all("deny")
+        for request_id in pending:
+            await self._emit(event_payload(
+                Event.PERMISSION_RESOLVED, self.session_id, request_id=request_id, decision="deny",
+            ))
         await self._provider.interrupt()
 
     async def close(self) -> None:

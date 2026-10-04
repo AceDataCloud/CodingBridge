@@ -196,3 +196,15 @@ def test_darwin_install_precleans_before_bootstrap(tmp_path, monkeypatch):
 
 def _boom(*a, **k):  # pragma: no cover - must never run
     raise AssertionError("subprocess.run should not be called here")
+
+
+def test_homebrew_service_uses_stable_opt_path(monkeypatch, tmp_path):
+    from coding_bridge import service_cli
+    binary = tmp_path / 'Cellar/coding-bridge/2026.1/libexec/bin/python'
+    binary.parent.mkdir(parents=True)
+    binary.write_text('python')
+    opt = tmp_path / 'opt/coding-bridge'
+    opt.parent.mkdir()
+    opt.symlink_to(binary.parents[2], target_is_directory=True)
+    monkeypatch.setattr(service_cli.sys, 'executable', str(binary))
+    assert service_cli._service_python() == str(opt / 'libexec/bin/python')

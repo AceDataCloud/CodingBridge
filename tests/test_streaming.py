@@ -1,7 +1,6 @@
-"""Token-level streaming: Claude partial messages and codex typewriter parity."""
+"""Claude partial messages and immediate Codex complete-message delivery."""
 
 from coding_bridge.config import Settings
-from coding_bridge.providers import codex
 from coding_bridge.providers.claude import ClaudeProvider
 from coding_bridge.providers.codex import CodexProvider
 
@@ -144,46 +143,71 @@ async def test_claude_two_text_blocks_get_distinct_ids():
     assert len(ids) == 2
 
 
-# --- Codex typewriter parity ------------------------------------------------
+# --- Codex complete messages ------------------------------------------------
 
 
-async def test_codex_agent_message_streams_then_commits():
+async def test_codex_forwards_complete_text_once_without_artificial_deltas():
     provider, events = _capturing(CodexProvider)
-    await provider._handle_event(
-        {
-            "type": "item.completed",
-            "item": {"type": "agent_message", "text": "Hello, world! Codex here."},
-        }
-    )
-    deltas = [e for e in events if e["event"] == "session.text_delta"]
-    assert deltas
-    assert "".join(d["text"] for d in deltas) == "Hello, world! Codex here."
-    assert len({d["id"] for d in deltas}) == 1
-
-    texts = [e for e in events if e["event"] == "session.text"]
-    assert len(texts) == 1
-    assert texts[0]["text"] == "Hello, world! Codex here."
-    assert texts[0]["id"] == deltas[0]["id"]
-    assert events[-1]["event"] == "session.text"  # commit is last
-
-
-async def test_codex_stream_chunk_count_is_capped():
-    provider, events = _capturing(CodexProvider)
-    text = "x" * 5000
+    text = "Hello from Codex" * 1000
     await provider._handle_event(
         {"type": "item.completed", "item": {"type": "agent_message", "text": text}}
     )
-    deltas = [e for e in events if e["event"] == "session.text_delta"]
-    assert len(deltas) <= codex.STREAM_CHUNK_TARGET
-    assert "".join(d["text"] for d in deltas) == text
+    assert len(events) == 1
+    assert events[0]["event"] == "session.text"
+    assert events[0]["text"] == text
 
 
-async def test_codex_short_message_still_streams():
-    provider, events = _capturing(CodexProvider)
-    await provider._handle_event(
-        {"type": "item.completed", "item": {"type": "agent_message", "text": "ok"}}
-    )
-    deltas = [e for e in events if e["event"] == "session.text_delta"]
-    assert "".join(d["text"] for d in deltas) == "ok"
-    assert events[-1]["event"] == "session.text"
-    assert events[-1]["text"] == "ok"
+async def test_claude_partial_block_repaired_by_complete_message():
+    provider, events = _capturing(ClaudeProvider)
+    provider._begin_stream_turn()
+    await provider._handle_message(_start(0))
+    await provider._handle_message(_delta(0, "partial"))
+    await provider._handle_message(_stop(0))
+    await provider._handle_message(_Assistant([_TextBlock("complete answer")]))
+    texts = [e for e in events if e['event'] == 'session.text']
+    assert texts[-1]['text'] == 'complete answer'
+    assert texts[0]['id'] == texts[-1]['id']
+    # A later unstreamed answer is not swallowed because an earlier block streamed.
+    await provider._handle_message(_Assistant([_TextBlock("final answer")]))
+    assert events[-1]['text'] == 'final answer'
+
+
+async def test_claude_stream_start_with_initial_text_is_preserved():
+    provider, events = _capturing(ClaudeProvider)
+    provider._begin_stream_turn()
+    await provider._handle_message(_Stream({
+        'type': 'content_block_start', 'index': 0,
+        'content_block': {'type': 'text', 'text': 'initial'},
+    }))
+    await provider._handle_message(_stop(0))
+    await provider._handle_message(_Assistant([_TextBlock('initial')]))
+    assert [e['text'] for e in events if e['event'] == 'session.text'] == ['initial']
+
+
+async def test_claude_complete_before_stop_keeps_order_without_duplicates():
+    provider, events = _capturing(ClaudeProvider)
+    provider._begin_stream_turn()
+    for text in ['first answer', 'second answer', 'final answer']:
+        await provider._handle_message(_Stream({'type': 'message_start', 'message': {'id': text}}))
+        await provider._handle_message(_start(0))
+        await provider._handle_message(_delta(0, text[:3]))
+        await provider._handle_message(_Assistant([_TextBlock(text)]))
+        await provider._handle_message(_stop(0))
+    texts = [e for e in events if e['event'] == 'session.text']
+    assert [e['text'] for e in texts] == ['first answer', 'second answer', 'final answer']
+    assert len({e['id'] for e in texts}) == 3
+
+
+async def test_claude_tool_images_do_not_forward_base64_payloads():
+    from types import SimpleNamespace
+    provider, events = _capturing(ClaudeProvider)
+    block = SimpleNamespace(tool_use_id='read-image', is_error=False, content=[
+        {'type': 'image', 'source': {
+            'type': 'base64', 'media_type': 'image/png', 'data': 'binary-secret',
+        }},
+        {'type': 'text', 'text': 'image metadata'},
+    ])
+    await provider._handle_block(block)
+    assert 'binary-secret' not in events[-1]['content']
+    assert 'image/png' in events[-1]['content']
+    assert 'image metadata' in events[-1]['content']

@@ -869,3 +869,19 @@ def test_codex_history_uses_real_prompt_after_injected_plugin_catalog(tmp_path):
     header, events = history._codex_read(path, {})
     assert header['title'] == 'Fix the calculator'
     assert [e['text'] for e in events if e['kind'] == 'prompt'] == ['Fix the calculator']
+
+
+def test_codex_patch_tool_is_not_lost_in_history():
+    from coding_bridge import history
+    events = []
+    header = {'title': ''}
+    history._codex_response_event({
+        'type': 'custom_tool_call', 'name': 'apply_patch', 'call_id': 'patch-1',
+        'input': '*** Begin Patch\n*** End Patch',
+    }, None, events, header)
+    history._codex_response_event({
+        'type': 'custom_tool_call_output', 'call_id': 'patch-1', 'output': 'Success',
+    }, None, events, header)
+    assert [e['kind'] for e in events] == ['tool_use', 'tool_result']
+    assert events[0]['tool'] == 'apply_patch'
+    assert events[1]['content'] == 'Success'

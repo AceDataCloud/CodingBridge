@@ -450,17 +450,17 @@ def _codex_response_event(
         text = _codex_reasoning_text(payload.get("summary"))
         if text:
             events.append({"kind": "thinking", "text": text, "ts": ts})
-    elif ptype == "function_call":
+    elif ptype in ("function_call", "custom_tool_call"):
         events.append(
             {
                 "kind": "tool_use",
                 "tool": payload.get("name"),
                 "tool_use_id": payload.get("call_id"),
-                "input": _maybe_json(payload.get("arguments")),
+                "input": _maybe_json(payload.get("arguments", payload.get("input"))),
                 "ts": ts,
             }
         )
-    elif ptype == "function_call_output":
+    elif ptype in ("function_call_output", "custom_tool_call_output"):
         events.append(
             {
                 "kind": "tool_result",

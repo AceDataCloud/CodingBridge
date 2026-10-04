@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING, Any
 from .. import attachments as attachment_store
 from .. import capabilities, claude_transcript
 from .. import images as image_store
-from ..protocol import Event, event_payload
+from ..protocol import Event, event_payload, tool_result_content
 from .base import slash_name
 
 if TYPE_CHECKING:
@@ -680,7 +680,7 @@ class ClaudeProvider:
                     Event.SESSION_TOOL_RESULT,
                     self._session_id,
                     tool_use_id=block.tool_use_id,
-                    content=_stringify(getattr(block, "content", None)),
+                    content=_stringify(tool_result_content(getattr(block, "content", None))),
                     is_error=bool(getattr(block, "is_error", False)),
                 )
             )

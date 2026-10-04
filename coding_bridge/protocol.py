@@ -153,3 +153,17 @@ def event_payload(
         payload["trace_id"] = trace_id
     payload.update(fields)
     return payload
+
+
+def tool_result_content(content: Any) -> Any:
+    """Keep displayable tool output while excluding embedded binary payloads."""
+    if not isinstance(content, list):
+        return content
+    visible = []
+    for block in content:
+        if isinstance(block, dict) and block.get("type") in {"image", "audio", "document"}:
+            source = block.get("source") or {}
+            visible.append({"type": block["type"], "media_type": source.get("media_type")})
+        else:
+            visible.append(block)
+    return visible

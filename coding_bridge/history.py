@@ -23,6 +23,8 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
+from .protocol import tool_result_content
+
 _log = logging.getLogger("coding-bridge.history")
 
 # Module-level roots so tests can point them at fixtures via monkeypatch.
@@ -296,7 +298,7 @@ def _claude_user_events(
                 {
                     "kind": "tool_result",
                     "tool_use_id": block.get("tool_use_id"),
-                    "content": _stringify(block.get("content")),
+                    "content": _stringify(tool_result_content(block.get("content"))),
                     "is_error": bool(block.get("is_error")),
                     "ts": ts,
                 }
@@ -329,7 +331,7 @@ def _claude_assistant_events(content: Any, ts: int | None, events: list[dict[str
                 {
                     "kind": "tool_result",
                     "tool_use_id": block.get("tool_use_id"),
-                    "content": _stringify(block.get("content")),
+                    "content": _stringify(tool_result_content(block.get("content"))),
                     "is_error": bool(block.get("is_error")),
                     "ts": ts,
                 }

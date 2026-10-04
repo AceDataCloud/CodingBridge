@@ -196,3 +196,18 @@ async def test_claude_complete_before_stop_keeps_order_without_duplicates():
     texts = [e for e in events if e['event'] == 'session.text']
     assert [e['text'] for e in texts] == ['first answer', 'second answer', 'final answer']
     assert len({e['id'] for e in texts}) == 3
+
+
+async def test_claude_tool_images_do_not_forward_base64_payloads():
+    from types import SimpleNamespace
+    provider, events = _capturing(ClaudeProvider)
+    block = SimpleNamespace(tool_use_id='read-image', is_error=False, content=[
+        {'type': 'image', 'source': {
+            'type': 'base64', 'media_type': 'image/png', 'data': 'binary-secret',
+        }},
+        {'type': 'text', 'text': 'image metadata'},
+    ])
+    await provider._handle_block(block)
+    assert 'binary-secret' not in events[-1]['content']
+    assert 'image/png' in events[-1]['content']
+    assert 'image metadata' in events[-1]['content']
